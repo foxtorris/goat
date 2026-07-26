@@ -1,6 +1,6 @@
 # Agent SDK
 
-`agent` is goat's Go agent SDK. Built on CloudWeGo Eino's `model.AgenticModel`, it provides native model tool calling, conversation memory, context compression, task planning, skills, MCP integration, tool plugins, multimodal input, and streaming result callbacks.
+`agent` is goat's Go agent SDK. Built on CloudWeGo Eino's `model.AgenticModel`, it provides native model tool calling, conversation context management, context compression, task planning, skills, MCP integration, tool plugins, multimodal input, and streaming result callbacks.
 
 The current agent implementation lives in `originagent`. The model decides whether and how to call tools; the SDK executes those tools, persists messages, manages context, and produces the final answer.
 
@@ -8,8 +8,8 @@ The current agent implementation lives in `originagent`. The model decides wheth
 
 - Native function calling with support for multiple tool calls in one model response.
 - Compatibility with OpenAI, Claude, Gemini, and any other model that implements Eino's `model.AgenticModel`.
-- File, in-memory, SQLite, and MySQL conversation memory backends.
-- Conversation continuation through `MemoryUID`.
+- File, in-memory, SQLite, and MySQL conversation context manager backends.
+- Conversation continuation through `ContextUID`.
 - Precise, aggressive, and selective-discard context compression strategies.
 - Task plan creation and updates, plus parallel execution of multiple tools.
 - Skill loading from a `skills/` directory.
@@ -21,19 +21,20 @@ The current agent implementation lives in `originagent`. The model decides wheth
 
 ```text
 agent/
-├── common/                  # Shared interfaces, messages, tools, memory, context, and configuration
+├── common/                  # Shared agent, message, tool, context, and configuration types
 │   ├── agent.go             # Agent, AgentDoArgs, callbacks, and compression configuration
 │   ├── agentic_message.go   # Text and image message constructors
 │   ├── ctx.go               # AgentContext with concurrency-safe metadata
-│   ├── memory.go            # Memory interface and MemoryUID
+│   ├── context_uid.go       # ContextUID conversation identifier
 │   ├── mcp_tool.go          # MCP Tool to common.Tool adapter
 │   ├── step.go              # Agent execution step type
 │   └── tool.go              # Tool, ToolResult, and JSON Schema helpers
-├── memory/
-│   ├── filemem/             # File storage; defaults to data/conversations
+├── contextmgr/
+│   ├── context_manager.go   # ContextManager interface
+│   ├── file/                # File storage; defaults to data/conversations
 │   ├── mysql/               # MySQL storage
 │   ├── ram/                 # In-process storage
-│   └── sqlite/              # SQLite storage; defaults to data/goat_memory.sqlite
+│   └── sqlite/              # SQLite storage; defaults to data/goat_context.sqlite
 ├── originagent/             # Native function-calling agent implementation
 │   └── compression/         # Independent context-compression strategies
 │       ├── precise.go       # Structured checkpoint strategy
@@ -49,7 +50,7 @@ The project requires Go 1.25.8 or newer.
 
 ```bash
 go get github.com/torrischen/goat/agent/originagent
-go get github.com/torrischen/goat/agent/memory/ram
+go get github.com/torrischen/goat/agent/contextmgr/ram
 ```
 
 Install the Eino adapter for the model provider you plan to use. For example:
@@ -74,7 +75,7 @@ import (
 
 	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/torrischen/goat/agent/common"
-	"github.com/torrischen/goat/agent/memory/ram"
+	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/originagent"
 	"github.com/torrischen/goat/streaming"
 )
@@ -90,9 +91,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	agent := originagent.NewAgent(llm, 128, ram.NewRAMMemory())
+	agent := originagent.NewAgent(llm, 128, ram.NewRAMContextManager())
 
-	memoryUID, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	contextUID, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "Introduce the goat Agent SDK in three sentences."},
 		MaxStep:   8,
 		FinalAnswerStreamingFunc: func(_ context.Context, chunk []byte) error {
@@ -120,13 +121,13 @@ func main() {
 		}
 	}
 
-	fmt.Printf("\nMemoryUID: %s\n", memoryUID)
+	fmt.Printf("\nContextUID: %s\n", contextUID)
 	fmt.Printf("Token usage: prompt=%d cached=%d completion=%d\n",
 		promptTokens, cachedTokens, completionTokens)
 }
 ```
 
-`Do` stores the current user message, starts the agent loop in the background, and immediately returns the run's `MemoryUID` and `Step` stream. Every call to `Do` has an independent stream, so callers do not need to poll memory to infer run boundaries. The stream closes when the agent finishes normally, is interrupted, the context is canceled, or background execution fails. Tool steps enter the stream after execution and callbacks complete; the final-answer step enters the stream after it has been persisted. `Step.ModelUsage` records SDK model calls, `Step.CallbackUsage` can record usage produced by callbacks, and `Step.Usage` is their total.
+`Do` stores the current user message, starts the agent loop in the background, and immediately returns the run's `ContextUID` and `Step` stream. Every call to `Do` has an independent stream, so callers do not need to poll the context manager to infer run boundaries. The stream closes when the agent finishes normally, is interrupted, the context is canceled, or background execution fails. Tool steps enter the stream after execution and callbacks complete; the final-answer step enters the stream after it has been persisted. `Step.ModelUsage` records SDK model calls, `Step.CallbackUsage` can record usage produced by callbacks, and `Step.Usage` is their total.
 
 ## Registering custom tools
 
@@ -182,7 +183,7 @@ The main fields in `common.AgentDoArgs` are:
 | Field | Description |
 | --- | --- |
 | `UserInput` | Text and image input for the current run. |
-| `MemoryUID` | Creates a conversation when empty; continues an existing conversation when set. |
+| `ContextUID` | Creates a conversation when empty; continues an existing conversation when set. |
 | `MaxStep` | Maximum execution rounds. Values at or below zero default to `8`. A batch of tool calls counts as one step. |
 | `SpecialRequirements` | Additional requirements appended to the system prompt and used during final-answer generation. |
 | `Compress` | Whether to compress context as it approaches the model limit. |
@@ -214,19 +215,19 @@ Available strategies:
 - `CompressionStrategyAggressive` summarizes older detailed tool-process messages as text while preserving recent raw messages.
 - `CompressionStrategyDiscardHalf` calls no model and discards the oldest half of detailed tool-process messages.
 
-## Conversation memory
+## Conversation context management
 
-Every memory backend implements `common.Memory`:
+Every backend implements `contextmgr.ContextManager`:
 
 ```go
-type Memory interface {
-	InitNew(context.Context) MemoryUID
-	NewMemoryUID(context.Context) MemoryUID
-	Append(context.Context, MemoryUID, *schema.AgenticMessage) error
-	GetAll(context.Context, MemoryUID) []*schema.AgenticMessage
-	Len(context.Context, MemoryUID) int
-	Reset(context.Context, MemoryUID, []*schema.AgenticMessage)
-	Delete(context.Context, MemoryUID) error
+type ContextManager interface {
+	InitNew(context.Context) common.ContextUID
+	NewContextUID(context.Context) common.ContextUID
+	Append(context.Context, common.ContextUID, *schema.AgenticMessage) error
+	GetAll(context.Context, common.ContextUID) []*schema.AgenticMessage
+	Len(context.Context, common.ContextUID) int
+	Reset(context.Context, common.ContextUID, []*schema.AgenticMessage)
+	Delete(context.Context, common.ContextUID) error
 }
 ```
 
@@ -234,36 +235,36 @@ type Memory interface {
 
 ```go
 // In-process storage for tests and short-lived processes.
-mem := ram.NewRAMMemory()
+manager := ram.NewRAMContextManager()
 
 // File storage; an empty path uses data/conversations.
-mem := filemem.NewFileMemory("")
+manager := file.NewFileContextManager("")
 
-// SQLite; an empty path uses data/goat_memory.sqlite.
-mem, err := sqlite.NewSQLiteMemory("")
+// SQLite; an empty path uses data/goat_context.sqlite.
+manager, err := sqlite.NewSQLiteContextManager("")
 
 // MySQL; the constructor automatically migrates the required tables.
-mem, err := mysql.NewMySQLMemory("127.0.0.1", 3306, "user", "password", "goat")
+manager, err := mysql.NewMysqlContextManager("127.0.0.1", 3306, "user", "password", "goat")
 ```
 
-`originagent.NewAgent(llm, modelMaxTokensK, nil)` uses file storage by default.
+`originagent.NewAgent(llm, modelMaxTokensK, nil)` uses `file.FileContextManager` by default.
 
 ### Continuing a conversation
 
 ```go
-memoryUID, firstRun, err := agent.Do(ctx, &common.AgentDoArgs{
+contextUID, firstRun, err := agent.Do(ctx, &common.AgentDoArgs{
 	UserInput: common.AgentUserInput{Text: "Remember that the project codename is goat."},
 })
 // Read firstRun until it returns streaming.ErrStreamClosed.
 
 _, secondRun, err := agent.Do(ctx, &common.AgentDoArgs{
-	MemoryUID: memoryUID,
+	ContextUID: contextUID,
 	UserInput: common.AgentUserInput{Text: "What is the project codename?"},
 })
 // Read secondRun until it returns streaming.ErrStreamClosed.
 ```
 
-When continuing a conversation, the SDK loads its history and updates the system prompt with the current run options. Because `Do` starts the agent loop asynchronously, drain the previous step stream until it closes before starting another run with the same `MemoryUID`. This confirms that the previous run has finished or paused.
+When continuing a conversation, the SDK loads its history and updates the system prompt with the current run options. Because `Do` starts the agent loop asynchronously, drain the previous step stream until it closes before starting another run with the same `ContextUID`. This confirms that the previous run has finished or paused.
 
 ## Multimodal input
 
@@ -367,10 +368,10 @@ Callbacks: &common.Callbacks{
 
 ### Reading the step stream
 
-`Do` returns the current run's `common.Step` stream directly, so memory polling is unnecessary. Tool-call steps include callback-processed input, observations, images, and usage. The final answer is emitted as a step where `IsFinalAnswer == true`.
+`Do` returns the current run's `common.Step` stream directly, so context manager polling is unnecessary. Tool-call steps include callback-processed input, observations, images, and usage. The final answer is emitted as a step where `IsFinalAnswer == true`.
 
 ```go
-memoryUID, stepStream, err := agent.Do(ctx, args)
+contextUID, stepStream, err := agent.Do(ctx, args)
 if err != nil {
 	return err
 }
@@ -382,7 +383,7 @@ for {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("memory=%s step=%+v\n", memoryUID, step)
+	fmt.Printf("conversation=%s step=%+v\n", contextUID, step)
 }
 ```
 
@@ -398,7 +399,7 @@ FinalAnswerWebhook: &common.FinalAnswerWebhookConfig{
 },
 ```
 
-The webhook payload contains the event name, agent name, `MemoryUID`, user input, final answer, and generation time. Consume execution steps from the stream returned by `Do`; the payload's `steps` field is currently empty.
+The webhook payload contains the event name, agent name, `ContextUID`, user input, final answer, and generation time. Consume execution steps from the stream returned by `Do`; the payload's `steps` field is currently empty.
 
 ## Built-in tools
 
@@ -422,13 +423,13 @@ go test ./agent/...
 Run the primary submodule tests:
 
 ```bash
-go test ./agent/originagent/... ./agent/tools ./agent/memory/sqlite ./agent/toolplugin
+go test ./agent/originagent/... ./agent/tools ./agent/contextmgr/sqlite ./agent/toolplugin
 ```
 
 ## Best practices
 
 - Set `modelMaxTokensK` to the model's real context length so compression starts at the correct time.
-- Prefer SQLite or MySQL in production. RAM memory is intended for tests and short-lived processes.
+- Prefer SQLite or MySQL context managers in production. The RAM context manager is intended for tests and short-lived processes.
 - Validate tool parameter types; never trust model-generated arguments directly.
 - Add authorization, idempotency, timeouts, and audit logging to tools with side effects.
 - Read `Step.Usage` from the stream returned by `Do` or from execution callbacks when aggregating tokens. If one model response triggers multiple tool calls, model usage appears only on the first tool step in that batch to prevent double counting.

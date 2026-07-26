@@ -14,13 +14,13 @@
   </p>
 </div>
 
-`goat` combines an asynchronous agent runtime, persistent conversation memory, extensible tools, Milvus retrieval, OpenAI-compatible embeddings, structured prompt building, and typed streams in one Go module. The agent layer is built on [CloudWeGo Eino](https://github.com/cloudwego/eino) and accepts any `model.AgenticModel` implementation.
+`goat` combines an asynchronous agent runtime, persistent conversation context, extensible tools, Milvus retrieval, OpenAI-compatible embeddings, structured prompt building, and typed streams in one Go module. The agent layer is built on [CloudWeGo Eino](https://github.com/cloudwego/eino) and accepts any `model.AgenticModel` implementation.
 
 ## Features
 
 - **Native tool calling** — execute one or more model-selected tools in an agent loop.
 - **Model agnostic** — use Eino adapters for OpenAI, Azure OpenAI, Claude, Gemini, or another compatible provider.
-- **Persistent memory** — choose RAM, JSONL files, SQLite, or MySQL and resume a conversation by `MemoryUID`.
+- **Context management** — choose RAM, JSONL files, SQLite, or MySQL and resume a conversation by `ContextUID`.
 - **Context compression** — compact long tool histories with precise, aggressive, or no-model discard strategies.
 - **Extensible tools** — register Go functions, MCP tools, Go shared libraries, or gRPC plugins.
 - **Planning and skills** — expose built-in planning tools and load skills on demand from a `skills/` directory.
@@ -34,8 +34,8 @@
 | Package | Purpose |
 | --- | --- |
 | [`agent/originagent`](agent/originagent) | Asynchronous native function-calling agent runtime. |
-| [`agent/common`](agent/common) | Agent, tool, memory, step, callback, and multimodal contracts. |
-| [`agent/memory`](agent/memory) | RAM, file, SQLite, and MySQL memory backends. |
+| [`agent/common`](agent/common) | Agent, tool, step, callback, and multimodal contracts. |
+| [`agent/contextmgr`](agent/contextmgr) | Context manager interface plus RAM, file, SQLite, and MySQL backends. |
 | [`agent/tools`](agent/tools) | Planning, skills, terminal, and shell tools. |
 | [`agent/toolplugin`](agent/toolplugin) | Go shared-library and gRPC tool plugins. |
 | [`embedder/openai`](embedder/openai) | OpenAI-compatible embedding client. |
@@ -48,7 +48,7 @@ flowchart LR
     App[Application] --> Agent[Agent runtime]
     Agent --> Model[Eino AgenticModel]
     Agent --> Tools[Go · MCP · gRPC · shared-library tools]
-    Agent --> Memory[RAM · files · SQLite · MySQL]
+    Agent --> ContextManager[RAM · files · SQLite · MySQL]
     Agent --> Steps[Typed step stream]
     App --> Retriever[Retriever]
     Retriever --> Milvus[(Milvus)]
@@ -60,7 +60,7 @@ flowchart LR
 - Go **1.25.8** or newer.
 - Credentials for the model or embedding provider you choose.
 - Milvus **2.6** only when using the retriever packages.
-- CGO and a C compiler when using the SQLite memory backend.
+- CGO and a C compiler when using the SQLite context manager.
 
 ## Installation
 
@@ -68,7 +68,7 @@ Install only the packages your application needs:
 
 ```bash
 go get github.com/torrischen/goat/agent/originagent
-go get github.com/torrischen/goat/agent/memory/ram
+go get github.com/torrischen/goat/agent/contextmgr/ram
 go get github.com/cloudwego/eino-ext/components/model/agenticopenai
 ```
 
@@ -102,7 +102,7 @@ import (
 
 	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/torrischen/goat/agent/common"
-	"github.com/torrischen/goat/agent/memory/ram"
+	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/originagent"
 	"github.com/torrischen/goat/streaming"
 )
@@ -119,9 +119,9 @@ func main() {
 	}
 
 	// 128 means an approximately 128K-token model context window.
-	agent := originagent.NewAgent(llm, 128, ram.NewRAMMemory())
+	agent := originagent.NewAgent(llm, 128, ram.NewRAMContextManager())
 
-	memoryUID, steps, err := agent.Do(ctx, &common.AgentDoArgs{
+	contextUID, steps, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{
 			Text: "Explain why typed streams are useful in Go in three bullets.",
 		},
@@ -135,7 +135,7 @@ func main() {
 		step, err := steps.ReadWithContext(ctx)
 		switch {
 		case errors.Is(err, streaming.ErrStreamClosed):
-			fmt.Printf("\nConversation: %s\n", memoryUID)
+			fmt.Printf("\nConversation: %s\n", contextUID)
 			return
 		case err != nil:
 			log.Fatal(err)
@@ -146,7 +146,7 @@ func main() {
 }
 ```
 
-`Agent.Do` stores the user message, starts the agent loop in the background, and immediately returns a conversation ID plus a stream for that run. Consume the stream until `streaming.ErrStreamClosed` before starting another turn with the same `MemoryUID`.
+`Agent.Do` stores the user message, starts the agent loop in the background, and immediately returns a `ContextUID` plus a stream for that run. Consume the stream until `streaming.ErrStreamClosed` before starting another turn with the same `ContextUID`.
 
 ### Add a custom tool
 
@@ -199,22 +199,22 @@ _, planningSteps, err := agent.Do(ctx, &common.AgentDoArgs{
 
 Consume `planningSteps` in the same way as the quick-start stream; the run is complete when the stream closes.
 
-## Conversation memory
+## Conversation context management
 
-Pass a memory implementation to `originagent.NewAgent`. Passing `nil` uses file memory in `data/conversations`.
+Pass a `contextmgr.ContextManager` implementation to `originagent.NewAgent`. Passing `nil` uses a `file.FileContextManager` rooted at `data/conversations`.
 
 | Backend | Constructor | Best suited for |
 | --- | --- | --- |
-| RAM | `ram.NewRAMMemory()` | Tests and short-lived processes. |
-| Files | `filemem.NewFileMemory("")` | Simple local JSONL persistence. |
-| SQLite | `sqlite.NewSQLiteMemory("")` | Durable single-node applications. |
-| MySQL | `mysql.NewMySQLMemory(...)` | Shared, multi-process deployments. |
+| RAM | `ram.NewRAMContextManager()` | Tests and short-lived processes. |
+| Files | `file.NewFileContextManager("")` | Simple local JSONL persistence. |
+| SQLite | `sqlite.NewSQLiteContextManager("")` | Durable single-node applications. |
+| MySQL | `mysql.NewMysqlContextManager(...)` | Shared, multi-process deployments. |
 
 Continue a completed conversation by passing the returned ID into the next run:
 
 ```go
 _, nextSteps, err := agent.Do(ctx, &common.AgentDoArgs{
-	MemoryUID: memoryUID,
+	ContextUID: contextUID,
 	UserInput: common.AgentUserInput{Text: "Summarize our conversation."},
 })
 ```
@@ -255,7 +255,7 @@ See the [Agent SDK guide](agent/README.md) for provider setup, MCP registration,
 
 Model-generated tool arguments are untrusted input. Validate parameters, enforce authorization and idempotency for side effects, apply timeouts, and run privileged tools in a sandbox. In particular, `agent/tools.Terminal` and `agent/tools.ShellCommand` execute commands with the permissions of the current process and should only be registered in controlled environments.
 
-Never commit provider credentials or include them directly in tool output, logs, or conversation memory.
+Never commit provider credentials or include them directly in tool output, logs, or persisted conversation context.
 
 ## Development
 

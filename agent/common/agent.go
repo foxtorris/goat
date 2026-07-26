@@ -10,9 +10,9 @@ import (
 
 type AgentDoArgs struct {
 	UserInput AgentUserInput
-	// MemoryUID is the unique identifier for the memory
-	// If set, the agent will load the memory to continue thinking.
-	MemoryUID MemoryUID
+	// ContextUID is the unique identifier for a conversation.
+	// If set, the agent will load its managed context to continue thinking.
+	ContextUID ContextUID
 	// SpecialRequirements will be appended to the system prompt and also used in final answer generation
 	SpecialRequirements []string
 	// Compress decides whether to compress the steps when context exceeds the limit
@@ -98,7 +98,7 @@ type ThinkResult struct {
 
 type Agent interface {
 	// Do stores the current user input, starts the agent loop asynchronously,
-	// and returns the memory UID and the step stream for this run. The stream is
+	// and returns the context UID and the step stream for this run. The stream is
 	// closed when the run finishes, is interrupted, or stops with an error.
-	Do(context.Context, *AgentDoArgs, ...model.Option) (MemoryUID, streaming.Stream[*Step], error)
+	Do(context.Context, *AgentDoArgs, ...model.Option) (ContextUID, streaming.Stream[*Step], error)
 }

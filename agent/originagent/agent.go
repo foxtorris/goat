@@ -11,7 +11,8 @@ import (
 	"sync"
 
 	"github.com/torrischen/goat/agent/common"
-	"github.com/torrischen/goat/agent/memory/filemem"
+	"github.com/torrischen/goat/agent/contextmgr"
+	filectx "github.com/torrischen/goat/agent/contextmgr/file"
 	"github.com/torrischen/goat/agent/toolplugin"
 	"github.com/torrischen/goat/agent/tools"
 	"github.com/torrischen/goat/streaming"
@@ -29,7 +30,7 @@ var _ common.Agent = (*Agent)(nil)
 
 type Agent struct {
 	mu              *sync.RWMutex
-	mem             common.Memory
+	contextManager  contextmgr.ContextManager
 	skills          []string
 	llmClient       model.AgenticModel
 	tools           []common.Tool
@@ -120,18 +121,18 @@ type Agent struct {
 func NewAgent(
 	llm model.AgenticModel,
 	modelMaxTokensK int,
-	mem common.Memory,
+	manager contextmgr.ContextManager,
 ) *Agent {
 	a := &Agent{
 		mu:              &sync.RWMutex{},
-		mem:             mem,
+		contextManager:  manager,
 		llmClient:       llm,
 		modelMaxTokensK: modelMaxTokensK,
 		toolsMap:        make(map[string]common.Tool),
 	}
 
-	if a.mem == nil {
-		a.mem = filemem.NewFileMemory("")
+	if a.contextManager == nil {
+		a.contextManager = filectx.NewFileContextManager("")
 	}
 
 	a.AddTools(
@@ -345,24 +346,24 @@ func (a *Agent) buildSystemPrompt(planMode bool, specialRequirements []string, s
 
 func appendConversationMessage(
 	ctx context.Context,
-	mem common.Memory,
-	muid common.MemoryUID,
+	manager contextmgr.ContextManager,
+	contextUID common.ContextUID,
 	messages *[]*schema.AgenticMessage,
 	message *schema.AgenticMessage,
 ) error {
 	*messages = append(*messages, message)
-	return mem.Append(ctx, muid, message)
+	return manager.Append(ctx, contextUID, message)
 }
 
 func commitConversationMessages(
 	ctx context.Context,
-	mem common.Memory,
-	muid common.MemoryUID,
+	manager contextmgr.ContextManager,
+	contextUID common.ContextUID,
 	messages *[]*schema.AgenticMessage,
 	newMessages ...*schema.AgenticMessage,
 ) {
 	*messages = append(*messages, newMessages...)
-	mem.Reset(ctx, muid, *messages)
+	manager.Reset(ctx, contextUID, *messages)
 }
 
 func optimizationAdviceMessages(steps ...*common.Step) []*schema.AgenticMessage {
@@ -450,7 +451,7 @@ func (a *Agent) Do(
 	ctx context.Context,
 	args *common.AgentDoArgs,
 	opts ...model.Option,
-) (common.MemoryUID, streaming.Stream[*common.Step], error) {
+) (common.ContextUID, streaming.Stream[*common.Step], error) {
 	args = cloneAgentDoArgs(args)
 	if args == nil {
 		return "", nil, fmt.Errorf("agent do args is nil")
@@ -466,7 +467,7 @@ func (a *Agent) Do(
 	}
 	maxStep := args.MaxStep
 
-	var muid common.MemoryUID
+	var contextUID common.ContextUID
 	var messages []*schema.AgenticMessage
 
 	systemPrompt := a.buildSystemPrompt(
@@ -477,45 +478,45 @@ func (a *Agent) Do(
 	)
 
 	// Initialize or restore conversation
-	if args.MemoryUID == "" {
+	if args.ContextUID == "" {
 		// New conversation
-		muid = a.mem.InitNew(ctx)
+		contextUID = a.contextManager.InitNew(ctx)
 
 		// Add and store system message
 		systemMessage := schema.SystemAgenticMessage(systemPrompt)
 		messages = []*schema.AgenticMessage{systemMessage}
-		if err := a.mem.Append(ctx, muid, systemMessage); err != nil {
+		if err := a.contextManager.Append(ctx, contextUID, systemMessage); err != nil {
 			return "", nil, fmt.Errorf("failed to store system message: %w", err)
 		}
 	} else {
 		// Continue existing conversation
-		muid = args.MemoryUID
+		contextUID = args.ContextUID
 
-		// Restore conversation history from memory
-		messages = a.mem.GetAll(ctx, muid)
+		// Restore the managed conversation history.
+		messages = a.contextManager.GetAll(ctx, contextUID)
 		if len(messages) == 0 {
 			systemMessage := schema.SystemAgenticMessage(systemPrompt)
 			messages = []*schema.AgenticMessage{systemMessage}
-			if err := a.mem.Append(ctx, muid, systemMessage); err != nil {
+			if err := a.contextManager.Append(ctx, contextUID, systemMessage); err != nil {
 				return "", nil, fmt.Errorf("failed to store system message: %w", err)
 			}
-			logging.Infof("Agent.Do: initialized empty conversation %s", muid)
+			logging.Infof("Agent.Do: initialized empty conversation %s", contextUID)
 		} else {
 			// Always update system prompt to reflect current mode and requirements
 			systemMessage := schema.SystemAgenticMessage(systemPrompt)
 			if messages[0].Role == schema.AgenticRoleTypeSystem {
 				// Replace existing system message
 				messages[0] = systemMessage
-				logging.Infof("Agent.Do: updated system message for conversation %s", muid)
+				logging.Infof("Agent.Do: updated system message for conversation %s", contextUID)
 			} else {
 				// Insert system message at the beginning (for legacy conversations)
 				messages = append([]*schema.AgenticMessage{systemMessage}, messages...)
-				logging.Infof("Agent.Do: inserted system message for conversation %s", muid)
+				logging.Infof("Agent.Do: inserted system message for conversation %s", contextUID)
 			}
-			// Update memory with new system prompt
-			a.mem.Reset(ctx, muid, messages)
+			// Update the managed context with the new system prompt.
+			a.contextManager.Reset(ctx, contextUID, messages)
 
-			logging.Infof("Agent.Do: Restored %d messages from conversation %s", len(messages), muid)
+			logging.Infof("Agent.Do: Restored %d messages from conversation %s", len(messages), contextUID)
 		}
 	}
 
@@ -529,7 +530,7 @@ func (a *Agent) Do(
 	}
 
 	// Store user message
-	if err := appendConversationMessage(ctx, a.mem, muid, &messages, userMessage); err != nil {
+	if err := appendConversationMessage(ctx, a.contextManager, contextUID, &messages, userMessage); err != nil {
 		return "", nil, fmt.Errorf("failed to store user message: %w", err)
 	}
 
@@ -559,7 +560,7 @@ func (a *Agent) Do(
 				args.FinalAnswerStreamingFunc,
 				callOpts...,
 			)
-			// Create Step for callbacks (not stored in memory)
+			// Create Step for callbacks (not persisted in the conversation context).
 			finalStep := &common.Step{
 				Thought:          "Now I know the answer.",
 				Action:           "Output the final answer in observation field.",
@@ -582,7 +583,7 @@ func (a *Agent) Do(
 			finalAnswer = finalStep.Observation
 			finalMessage := common.AssistantTextMessage(finalAnswer)
 			finalMessage.ResponseMeta = responseMetaFromUsage(promptTokens, cachedTokens, completionTokens)
-			if err := appendConversationMessage(actx, a.mem, muid, &messages, finalMessage); err != nil {
+			if err := appendConversationMessage(actx, a.contextManager, contextUID, &messages, finalMessage); err != nil {
 				logging.Errorf("Agent.Do: failed to store final answer: %v", err)
 				return err
 			}
@@ -596,7 +597,7 @@ func (a *Agent) Do(
 			a.sendFinalAnswerWebhook(
 				actx,
 				args.FinalAnswerWebhook,
-				a.buildFinalAnswerWebhookPayload(muid, args, finalAnswer),
+				a.buildFinalAnswerWebhookPayload(contextUID, args, finalAnswer),
 			)
 
 			return nil
@@ -638,7 +639,7 @@ func (a *Agent) Do(
 			if thinkResult.IsCompressed {
 				if len(thinkResult.CompressedMessages) > 0 {
 					messages = thinkResult.CompressedMessages
-					a.mem.Reset(ctx, muid, messages)
+					a.contextManager.Reset(ctx, contextUID, messages)
 				}
 			}
 
@@ -710,7 +711,7 @@ func (a *Agent) Do(
 							thought = reasoningContent
 						}
 
-						// Create Step for callbacks (not stored in memory)
+						// Create Step for callbacks (not persisted in the conversation context).
 						newStep := &common.Step{
 							Thought:          thought,
 							Action:           "Call tool: " + toolName,
@@ -760,7 +761,7 @@ func (a *Agent) Do(
 				p.StopAndWait()
 
 				// Commit the complete tool-call batch only after all PPOF hooks have
-				// settled, so memory never contains an incomplete step.
+				// settled, so the managed context never contains an incomplete step.
 				pendingMessages := []*schema.AgenticMessage{assistantMessage}
 
 				// Add tool results to conversation
@@ -772,7 +773,7 @@ func (a *Agent) Do(
 				}
 
 				pendingMessages = append(pendingMessages, optimizationAdviceMessages(toolSteps...)...)
-				commitConversationMessages(ctx, a.mem, muid, &messages, pendingMessages...)
+				commitConversationMessages(ctx, a.contextManager, contextUID, &messages, pendingMessages...)
 
 				// Count the whole assistant tool-call batch as a single quota step,
 				// even when the model requested multiple tool executions at once.
@@ -787,7 +788,7 @@ func (a *Agent) Do(
 				}
 
 				if common.ConsumeInterruptSignal(actx) {
-					logging.Infof("Agent.Do: interrupt signal received, stopping agent loop for conversation %s", muid)
+					logging.Infof("Agent.Do: interrupt signal received, stopping agent loop for conversation %s", contextUID)
 					return nil
 				}
 
@@ -812,7 +813,7 @@ func (a *Agent) Do(
 			finalAnswer := assistantText(raw)
 			finalMessage := raw
 
-			// Create Step for callbacks (not stored in memory)
+			// Create Step for callbacks (not persisted in the conversation context).
 			newStep := &common.Step{
 				Thought:          thought,
 				Action:           "Generate final answer based on context.",
@@ -839,7 +840,7 @@ func (a *Agent) Do(
 			if reasoningContent != "" {
 				finalMessage.ContentBlocks = append([]*schema.ContentBlock{common.ReasoningBlock(reasoningContent)}, finalMessage.ContentBlocks...)
 			}
-			if err := appendConversationMessage(ctx, a.mem, muid, &messages, finalMessage); err != nil {
+			if err := appendConversationMessage(ctx, a.contextManager, contextUID, &messages, finalMessage); err != nil {
 				logging.Errorf("Agent.Do: failed to store final message: %v", err)
 				return err
 			}
@@ -853,7 +854,7 @@ func (a *Agent) Do(
 			a.sendFinalAnswerWebhook(
 				actx,
 				args.FinalAnswerWebhook,
-				a.buildFinalAnswerWebhookPayload(muid, args, finalAnswer),
+				a.buildFinalAnswerWebhookPayload(contextUID, args, finalAnswer),
 			)
 
 			// This is a final answer, exit
@@ -864,9 +865,9 @@ func (a *Agent) Do(
 	go func() {
 		defer stepStream.Close()
 		if err := runLoop(); err != nil {
-			logging.Errorf("Agent.Do: background run error for conversation %s: %v", muid, err)
+			logging.Errorf("Agent.Do: background run error for conversation %s: %v", contextUID, err)
 		}
 	}()
 
-	return muid, stepStream, nil
+	return contextUID, stepStream, nil
 }

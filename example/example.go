@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/torrischen/goat/agent/common"
-	"github.com/torrischen/goat/agent/memory/ram"
-	"github.com/torrischen/goat/agent/memory/sqlite"
+	"github.com/torrischen/goat/agent/contextmgr/ram"
+	"github.com/torrischen/goat/agent/contextmgr/sqlite"
 	"github.com/torrischen/goat/agent/originagent"
 	"github.com/torrischen/goat/embedder/openai"
 	"github.com/torrischen/goat/retriever/milvus"
@@ -107,12 +107,12 @@ func AzureOpenAITest() {
 		panic(err)
 	}
 
-	db, err := sqlite.NewSQLiteMemory("data/agent.db")
+	manager, err := sqlite.NewSQLiteContextManager("data/agent.db")
 	if err != nil {
 		panic(err)
 	}
-	agent := originagent.NewAgent(llm, 128, db)
-	muid, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	agent := originagent.NewAgent(llm, 128, manager)
+	contextUID, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "Say hello in one sentence."},
 		MaxStep:   4,
 	})
@@ -136,7 +136,7 @@ func AzureOpenAITest() {
 		}
 	}
 
-	fmt.Println("memory:", muid)
+	fmt.Println("conversation:", contextUID)
 	fmt.Printf("usage: prompt=%d cached=%d completion=%d\n", promptTokens, cachedTokens, completionTokens)
 }
 
@@ -149,8 +149,8 @@ func OpenAIAgentInterruptTest() {
 		panic(err)
 	}
 
-	mem := ram.NewRAMMemory()
-	agent := originagent.NewAgent(llm, 128, mem)
+	manager := ram.NewRAMContextManager()
+	agent := originagent.NewAgent(llm, 128, manager)
 
 	const approvalToolName = "request_human_approval"
 	approvalTool := common.NewDefaultTool(
@@ -172,7 +172,7 @@ func OpenAIAgentInterruptTest() {
 	)
 	agent.AddTool(ctx, common.InterruptLoopAfter(approvalTool))
 
-	muid, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	contextUID, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{
 			Text: "Before doing anything else, request human approval for deploying to production. Use the request_human_approval tool and then wait.",
 		},
@@ -215,11 +215,11 @@ func OpenAIAgentInterruptTest() {
 		panic("approval tool step was not streamed")
 	}
 
-	fmt.Println("memory:", muid)
+	fmt.Println("conversation:", contextUID)
 	fmt.Printf("interrupt tool: %s\n", interruptStep.ToolName)
 	fmt.Printf("tool input: %+v\n", interruptStep.ActionInputParam)
 	fmt.Printf("tool observation: %s\n", interruptStep.Observation)
-	fmt.Printf("memory messages after interrupt: %d\n", mem.Len(ctx, muid))
+	fmt.Printf("context messages after interrupt: %d\n", manager.Len(ctx, contextUID))
 	fmt.Printf("usage: prompt=%d cached=%d completion=%d\n", promptTokens, cachedTokens, completionTokens)
 }
 

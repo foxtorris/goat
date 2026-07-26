@@ -13,17 +13,17 @@ import (
 )
 
 func (a *Agent) buildFinalAnswerWebhookPayload(
-	muid common.MemoryUID,
+	contextUID common.ContextUID,
 	args *common.AgentDoArgs,
 	finalAnswer string,
 ) *common.FinalAnswerWebhookPayload {
 	return &common.FinalAnswerWebhookPayload{
 		Event:       "final_answer",
 		Agent:       "originagent",
-		MemoryUID:   muid,
+		ContextUID:  contextUID,
 		UserInput:   args.UserInput.Text,
 		FinalAnswer: finalAnswer,
-		Steps:       nil, // Steps are no longer stored in memory
+		Steps:       nil, // Steps are no longer persisted in the conversation context.
 		GeneratedAt: time.Now().UTC(),
 	}
 }

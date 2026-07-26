@@ -1,4 +1,4 @@
-package filemem
+package file
 
 import (
 	"bufio"
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/agent/contextmgr"
 	"github.com/torrischen/goat/util"
 	"github.com/torrischen/goat/util/logging"
 
@@ -20,16 +21,17 @@ import (
 	"github.com/google/uuid"
 )
 
-// FileMemory implements Memory using file storage
-type FileMemory struct {
+// FileContextManager manages conversation context using file storage.
+type FileContextManager struct {
 	mu    sync.RWMutex
 	dir   string
-	cache map[common.MemoryUID][]*schema.AgenticMessage
+	cache map[common.ContextUID][]*schema.AgenticMessage
 }
 
-var _ common.Memory = (*FileMemory)(nil)
+var _ contextmgr.ContextManager = (*FileContextManager)(nil)
 
-func NewFileMemory(dir string) *FileMemory {
+// NewFileContextManager creates a file-backed context manager.
+func NewFileContextManager(dir string) *FileContextManager {
 	if dir == "" {
 		dir = "data/conversations"
 	}
@@ -38,39 +40,39 @@ func NewFileMemory(dir string) *FileMemory {
 		logging.Errorf("Failed to create conversation directory: %v", err)
 	}
 
-	return &FileMemory{
+	return &FileContextManager{
 		dir:   dir,
-		cache: make(map[common.MemoryUID][]*schema.AgenticMessage),
+		cache: make(map[common.ContextUID][]*schema.AgenticMessage),
 	}
 }
 
-func (m *FileMemory) InitNew(ctx context.Context) common.MemoryUID {
-	muid := m.NewMemoryUID(ctx)
+func (m *FileContextManager) InitNew(ctx context.Context) common.ContextUID {
+	contextUID := m.NewContextUID(ctx)
 
 	m.mu.Lock()
-	m.cache[muid] = []*schema.AgenticMessage{}
+	m.cache[contextUID] = []*schema.AgenticMessage{}
 	m.mu.Unlock()
 
 	// Create empty file
-	if err := m.persist(muid, []*schema.AgenticMessage{}); err != nil {
+	if err := m.persist(contextUID, []*schema.AgenticMessage{}); err != nil {
 		logging.Errorf("Failed to persist new conversation: %v", err)
 	}
 
-	return muid
+	return contextUID
 }
 
-func (m *FileMemory) NewMemoryUID(_ context.Context) common.MemoryUID {
-	return common.MemoryUID(uuid.NewString())
+func (m *FileContextManager) NewContextUID(_ context.Context) common.ContextUID {
+	return common.ContextUID(uuid.NewString())
 }
 
-func (m *FileMemory) Append(ctx context.Context, muid common.MemoryUID, message *schema.AgenticMessage) error {
+func (m *FileContextManager) Append(ctx context.Context, contextUID common.ContextUID, message *schema.AgenticMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	messages, exists := m.cache[muid]
+	messages, exists := m.cache[contextUID]
 	if !exists {
 		// Try to load from disk
-		loaded, err := m.load(muid)
+		loaded, err := m.load(contextUID)
 		if err != nil {
 			return err
 		}
@@ -78,15 +80,15 @@ func (m *FileMemory) Append(ctx context.Context, muid common.MemoryUID, message 
 	}
 
 	messages = append(messages, message)
-	m.cache[muid] = messages
+	m.cache[contextUID] = messages
 
 	// Persist to disk
-	return m.persist(muid, messages)
+	return m.persist(contextUID, messages)
 }
 
-func (m *FileMemory) GetAll(ctx context.Context, muid common.MemoryUID) []*schema.AgenticMessage {
+func (m *FileContextManager) GetAll(ctx context.Context, contextUID common.ContextUID) []*schema.AgenticMessage {
 	m.mu.RLock()
-	messages, exists := m.cache[muid]
+	messages, exists := m.cache[contextUID]
 	m.mu.RUnlock()
 
 	if exists {
@@ -95,40 +97,40 @@ func (m *FileMemory) GetAll(ctx context.Context, muid common.MemoryUID) []*schem
 	}
 
 	// Try to load from disk
-	loaded, err := m.load(muid)
+	loaded, err := m.load(contextUID)
 	if err != nil {
-		logging.Errorf("Failed to load conversation %s: %v", muid, err)
+		logging.Errorf("Failed to load conversation %s: %v", contextUID, err)
 		return []*schema.AgenticMessage{}
 	}
 
 	m.mu.Lock()
-	m.cache[muid] = loaded
+	m.cache[contextUID] = loaded
 	m.mu.Unlock()
 
 	return common.CloneAgenticMessages(loaded)
 }
 
-func (m *FileMemory) Len(ctx context.Context, muid common.MemoryUID) int {
-	return len(m.GetAll(ctx, muid))
+func (m *FileContextManager) Len(ctx context.Context, contextUID common.ContextUID) int {
+	return len(m.GetAll(ctx, contextUID))
 }
 
-func (m *FileMemory) Reset(ctx context.Context, muid common.MemoryUID, messages []*schema.AgenticMessage) {
+func (m *FileContextManager) Reset(ctx context.Context, contextUID common.ContextUID, messages []*schema.AgenticMessage) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.cache[muid] = messages
-	if err := m.persist(muid, messages); err != nil {
+	m.cache[contextUID] = messages
+	if err := m.persist(contextUID, messages); err != nil {
 		logging.Errorf("Failed to reset conversation: %v", err)
 	}
 }
 
-func (m *FileMemory) Delete(ctx context.Context, muid common.MemoryUID) error {
+func (m *FileContextManager) Delete(ctx context.Context, contextUID common.ContextUID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	delete(m.cache, muid)
+	delete(m.cache, contextUID)
 
-	filePath := m.getFilePath(muid)
+	filePath := m.getFilePath(contextUID)
 	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -138,9 +140,9 @@ func (m *FileMemory) Delete(ctx context.Context, muid common.MemoryUID) error {
 
 // Helper methods
 
-func (m *FileMemory) getFilePath(muid common.MemoryUID) string {
+func (m *FileContextManager) getFilePath(contextUID common.ContextUID) string {
 	dateDir := filepath.Join(m.dir, time.Now().Format("2006-01-02"))
-	fileName := string(muid) + ".jsonl"
+	fileName := string(contextUID) + ".jsonl"
 	currentPath := filepath.Join(dateDir, fileName)
 	if _, err := os.Stat(currentPath); err == nil {
 		return currentPath
@@ -166,8 +168,8 @@ func (m *FileMemory) getFilePath(muid common.MemoryUID) string {
 	return currentPath
 }
 
-func (m *FileMemory) persist(muid common.MemoryUID, messages []*schema.AgenticMessage) error {
-	filePath := m.getFilePath(muid)
+func (m *FileContextManager) persist(contextUID common.ContextUID, messages []*schema.AgenticMessage) error {
+	filePath := m.getFilePath(contextUID)
 	tmpPath := filePath + ".tmp"
 
 	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -205,8 +207,8 @@ func (m *FileMemory) persist(muid common.MemoryUID, messages []*schema.AgenticMe
 	return os.Rename(tmpPath, filePath)
 }
 
-func (m *FileMemory) load(muid common.MemoryUID) ([]*schema.AgenticMessage, error) {
-	filePath := m.getFilePath(muid)
+func (m *FileContextManager) load(contextUID common.ContextUID) ([]*schema.AgenticMessage, error) {
+	filePath := m.getFilePath(contextUID)
 
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -278,7 +280,7 @@ type storedPart struct {
 	Content    string `json:"content,omitempty"`
 }
 
-func (m *FileMemory) encodeMessage(msg *schema.AgenticMessage) (string, error) {
+func (m *FileContextManager) encodeMessage(msg *schema.AgenticMessage) (string, error) {
 	b, err := sonic.Marshal(msg)
 	if err != nil {
 		return "", err
@@ -286,7 +288,7 @@ func (m *FileMemory) encodeMessage(msg *schema.AgenticMessage) (string, error) {
 	return util.ByteToString(b), nil
 }
 
-func (m *FileMemory) decodeMessage(line string) (*schema.AgenticMessage, error) {
+func (m *FileContextManager) decodeMessage(line string) (*schema.AgenticMessage, error) {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return nil, errors.New("empty line")
