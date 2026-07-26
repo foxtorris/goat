@@ -303,45 +303,16 @@ func (a *Agent) LoadRPCPluginTools(ctx context.Context, address ...string) error
 
 func (a *Agent) buildSystemPrompt(planMode bool, specialRequirements []string, skillUsageInstruction string, planUsageInstruction string) string {
 	a.mu.RLock()
-	skills := append([]string{}, a.skills...)
+	skills := append([]string(nil), a.skills...)
 	a.mu.RUnlock()
 
-	if skillUsageInstruction == "" {
-		skillUsageInstruction = "NONE"
-	}
-	if planUsageInstruction == "" {
-		planUsageInstruction = "NONE"
-	}
-
-	tmpl := OriginAgentSystemPromptTemplate
-	if planMode {
-		tmpl = OriginAgentWithPlanSystemPromptTemplate
-	}
-
-	var systemPrompt string
-	if planMode {
-		systemPrompt = fmt.Sprintf(
-			tmpl,
-			strings.Join(skills, "\n"),
-			skillUsageInstruction,
-			planUsageInstruction,
-		)
-	} else {
-		systemPrompt = fmt.Sprintf(
-			tmpl,
-			strings.Join(skills, "\n"),
-			skillUsageInstruction,
-		)
-	}
-
-	if len(specialRequirements) > 0 {
-		systemPrompt += "\n\nSpecial Requirements:\n"
-		for i, req := range specialRequirements {
-			systemPrompt += fmt.Sprintf("%d. %s\n", i+1, req)
-		}
-	}
-
-	return systemPrompt
+	return renderOriginAgentSystemPrompt(
+		planMode,
+		skills,
+		specialRequirements,
+		skillUsageInstruction,
+		planUsageInstruction,
+	)
 }
 
 func appendConversationMessage(
