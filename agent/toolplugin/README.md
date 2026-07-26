@@ -1,6 +1,6 @@
 # Tool Plugin Cookbook
 
-## 1. Golang Example
+## 1. Go Example
 
 ```go
 package main
@@ -15,11 +15,11 @@ var _ toolplugin.ToolPlugin = (*Tool)(nil)
 type Tool struct{}
 
 func (t *Tool) Name() string {
-	return "chinese-translate"
+	return "english-translate"
 }
 
 func (t *Tool) Description() string {
-	return "A tool for translating text to Chinese."
+	return "A tool for translating text to English."
 }
 
 func (t *Tool) Parameters() common.ToolParameters {
@@ -27,17 +27,21 @@ func (t *Tool) Parameters() common.ToolParameters {
 		common.ToolProperty{
 			Name:        "text",
 			Type:        "string",
-			Description: "The text to be translated to Chinese.",
+			Description: "The text to be translated to English.",
 			Required:    true,
 		},
 	)
 }
 
 func (t *Tool) Execute(actx *common.AgentContext, a map[string]any) common.ToolResult {
-	return common.NewDefaultToolResult("你好")
+	return common.NewDefaultToolResult("Hello")
 }
 
 func (t *Tool) Init() error {
+	return nil
+}
+
+func (t *Tool) Ping() error {
 	return nil
 }
 
@@ -51,7 +55,7 @@ func main() {}
 ### Build
 
 ```bash
-go build -buildmode plugin -o xxxxx.so xxx.go
+go build -buildmode=plugin -o english-translate.so tool.go
 ```
 
 ## 2. Python Example
@@ -61,13 +65,13 @@ go build -buildmode plugin -o xxxxx.so xxx.go
 # dependencies:
 #   pip install grpcio grpcio-tools protobuf
 #
-# grpc code hacking:
+# generate gRPC bindings:
 #   python -m grpc_tools.protoc -I. \
 #     --python_out=. --grpc_python_out=. \
 #     -I$(python -c "import pkgutil,grpc_tools,os; import grpc_tools; print(os.path.dirname(grpc_tools.__file__) + '/_proto')") \
 #     plugin.proto
 #
-# test:
+# run:
 #   python server.py
 
 from concurrent import futures
@@ -82,11 +86,14 @@ class PluginService(plugin_pb2_grpc.PluginServiceServicer):
     def Init(self, request, context):
         return empty_pb2.Empty()
 
+    def Ping(self, request, context):
+        return empty_pb2.Empty()
+
     def Name(self, request, context):
-        return plugin_pb2.NameResponse(name="ChineseTranslator")
+        return plugin_pb2.NameResponse(name="EnglishTranslator")
 
     def Description(self, request, context):
-        return plugin_pb2.DescriptionResponse(description="Help you translate the text into Chinese.")
+        return plugin_pb2.DescriptionResponse(description="Help you translate text into English.")
 
     def Properties(self, request, context):
         props = [
@@ -108,11 +115,11 @@ class PluginService(plugin_pb2_grpc.PluginServiceServicer):
         structured = struct_pb2.Struct()
         structured.update(
             {
-                "translated_text": ["你好", "世界"],
+                "translated_text": ["Hello", "World"],
             }
         )
         return plugin_pb2.ExecuteResponse(
-            result="Generated 2 previews.",
+            result="Translated 2 values.",
             structured_content=structured,
             image_parts=[
                 plugin_pb2.ImagePart(
@@ -142,7 +149,7 @@ if __name__ == "__main__":
     serve()
 ```
 
-### Build
+### Setup and generate bindings
 
 ```bash
 uv venv && uv pip install grpcio grpcio-tools protobuf

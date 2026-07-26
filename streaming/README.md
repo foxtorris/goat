@@ -1,26 +1,26 @@
 # Streaming SDK
 
-`streaming` 提供一个基于 Go 泛型和 Channel 的轻量级、并发安全数据流抽象，适合在生产者与消费者、异步任务、Agent 执行过程之间传递类型安全的数据。
+`streaming` provides a lightweight, concurrency-safe data stream abstraction built with Go generics and channels. It is suitable for passing type-safe values between producers and consumers, asynchronous tasks, and agent execution loops.
 
-模块仅依赖 Go 标准库，支持缓冲与无缓冲模式、阻塞与非阻塞写入、超时、Context 取消、批量读写以及简单的流转换组合。
+The package depends only on the Go standard library. It supports buffered and unbuffered streams, blocking and non-blocking writes, timeouts, context cancellation, batch operations, and simple stream transformations.
 
-## 功能概览
+## Features
 
-- 使用 Go 泛型提供编译期类型安全。
-- 支持缓冲流与无缓冲流。
-- 支持阻塞读取、超时读取和 Context 读取。
-- 支持阻塞写入、非阻塞写入、超时写入和 Context 写入。
-- 支持幂等关闭，并允许关闭后继续读完缓冲区中的数据。
-- 支持 `Transform`、`Filter` 和 `Merge` 流组合。
-- 支持 `ReadAll` 与 `WriteAll` 批量操作。
+- Compile-time type safety through Go generics.
+- Buffered and unbuffered streams.
+- Blocking, timeout-based, and context-aware reads.
+- Blocking, non-blocking, timeout-based, and context-aware writes.
+- Idempotent close operations with buffered values remaining readable after close.
+- `Transform`, `Filter`, and `Merge` stream composition.
+- `ReadAll` and `WriteAll` batch operations.
 
-## 安装
+## Installation
 
 ```bash
 go get github.com/torrischen/goat/streaming
 ```
 
-## 快速开始
+## Quick start
 
 ```go
 package main
@@ -59,9 +59,9 @@ func main() {
 }
 ```
 
-生产者通常负责关闭流，消费者持续读取直到收到 `ErrStreamClosed`。`Close` 不会丢弃已经写入缓冲区的数据。
+The producer normally owns the stream and closes it. The consumer continues reading until it receives `ErrStreamClosed`. Calling `Close` does not discard values that are already buffered.
 
-## 核心接口
+## Core interface
 
 ```go
 type Stream[T any] interface {
@@ -77,51 +77,51 @@ type Stream[T any] interface {
 }
 ```
 
-`NewStream` 返回具体类型 `*StreamImpl[T]`。除接口方法外，具体类型还提供 `TryWrite`、`ReadAll` 和 `WriteAll`。
+`NewStream` returns the concrete type `*StreamImpl[T]`. In addition to the interface methods, the concrete type provides `TryWrite`, `ReadAll`, and `WriteAll`.
 
-## 创建 Stream
+## Creating a stream
 
-### 缓冲流
+### Buffered stream
 
 ```go
 stream := streaming.NewStream[string](16)
 ```
 
-只要缓冲区未满，写入方就不需要等待消费者。缓冲大小为 `0` 时行为与无缓冲 Channel 相同。
+A producer can write without waiting while the buffer has capacity. A buffer size of `0` behaves like an unbuffered channel.
 
-### 无缓冲流
+### Unbuffered stream
 
 ```go
 stream := streaming.NewUnbufferedStream[string]()
 ```
 
-无缓冲流用于生产者和消费者同步交接数据：写入会等待某个消费者读取。
+An unbuffered stream synchronizes the producer and consumer: a write waits until a consumer receives the value.
 
-## 读取数据
+## Reading values
 
-### 阻塞读取
+### Blocking read
 
 ```go
 value, err := stream.Read()
 ```
 
-`Read` 会一直等待以下任一情况发生：
+`Read` waits until one of the following occurs:
 
-- 读取到一条数据；
-- Stream 已关闭且缓冲区已读空，此时返回 `ErrStreamClosed`。
+- A value becomes available.
+- The stream is closed and its buffer is empty, in which case it returns `ErrStreamClosed`.
 
-### 超时读取
+### Timed read
 
 ```go
 value, err := stream.ReadWithTimeout(2 * time.Second)
 if errors.Is(err, context.DeadlineExceeded) {
-	// 在超时时间内没有读到数据。
+	// No value arrived before the timeout.
 }
 ```
 
-当前实现使用 `context.WithTimeout`，超时时返回 `context.DeadlineExceeded`。
+The current implementation uses `context.WithTimeout` and returns `context.DeadlineExceeded` when the timeout expires.
 
-### Context 读取
+### Context-aware read
 
 ```go
 ctx, cancel := context.WithCancel(context.Background())
@@ -129,47 +129,47 @@ defer cancel()
 
 value, err := stream.ReadWithContext(ctx)
 if errors.Is(err, context.Canceled) {
-	// 调用方取消了等待。
+	// The caller canceled this wait.
 }
 ```
 
-Context 只取消本次等待，不会自动关闭 Stream。
+Canceling the context only cancels the current wait; it does not close the stream.
 
-### 读取全部数据
+### Read all values
 
 ```go
 items, err := stream.ReadAll()
 ```
 
-`ReadAll` 会持续读取，直到 Stream 被关闭并且缓冲区被读空。因此，调用前必须确保某个生产者最终会调用 `Close`，否则它可能永久阻塞。
+`ReadAll` continues reading until the stream is closed and its buffer is empty. Before calling it, make sure a producer will eventually call `Close`; otherwise, `ReadAll` may block forever.
 
-## 写入数据
+## Writing values
 
-### 阻塞写入
+### Blocking write
 
 ```go
 err := stream.Write(value)
 ```
 
-当缓冲区已满或 Stream 无缓冲时，`Write` 会等待可用消费者；Stream 已关闭时返回 `ErrStreamClosed`。
+When the buffer is full, or when the stream is unbuffered, `Write` waits for a consumer. It returns `ErrStreamClosed` if the stream has already been closed.
 
-### 非阻塞写入
+### Non-blocking write
 
 ```go
 err := stream.TryWrite(value)
 switch {
 case err == nil:
-	// 写入成功。
+	// The value was written.
 case errors.Is(err, streaming.ErrWouldBlock):
-	// 当前没有可用容量或消费者。
+	// No buffer capacity or consumer is currently available.
 case errors.Is(err, streaming.ErrStreamClosed):
-	// Stream 已关闭。
+	// The stream is closed.
 }
 ```
 
-`TryWrite` 是 `StreamImpl` 的扩展方法，不属于 `Stream` 接口。
+`TryWrite` is an extension method on `StreamImpl`; it is not part of the `Stream` interface.
 
-### 超时与 Context 写入
+### Timed and context-aware writes
 
 ```go
 err := stream.WriteWithTimeout(value, time.Second)
@@ -179,37 +179,37 @@ defer cancel()
 err = stream.WriteWithContext(ctx, value)
 ```
 
-超时返回 `context.DeadlineExceeded`，主动取消返回 `context.Canceled`。Context 取消同样不会关闭 Stream。
+A timeout returns `context.DeadlineExceeded`, while explicit cancellation returns `context.Canceled`. Canceling the context does not close the stream.
 
-### 批量写入
+### Batch write
 
 ```go
 err := stream.WriteAll([]int{1, 2, 3})
 ```
 
-`WriteAll` 按顺序调用 `Write`。发生首个错误时立即返回，之前写入的数据不会回滚。
+`WriteAll` calls `Write` for each value in order. It returns on the first error, and values written before that error are not rolled back.
 
-## 生命周期
+## Lifecycle
 
 ```go
 stream := streaming.NewStream[int](8)
 
 fmt.Println(stream.IsClosed()) // false
-fmt.Println(stream.Len())      // 当前缓冲区中的元素数量
+fmt.Println(stream.Len())      // Number of values currently buffered
 
 _ = stream.Close()
-_ = stream.Close() // Close 是幂等的
+_ = stream.Close() // Close is idempotent
 ```
 
-需要注意：
+Important lifecycle behavior:
 
-- `Close` 只关闭 Stream 的生命周期信号，不直接关闭内部数据 Channel。
-- 关闭后禁止继续写入，但消费者仍可读取缓冲区中的剩余数据。
-- `Len` 返回当前缓冲区长度，不包含正在处理或等待写入的数据。
-- `IsClosed` 只表示已调用 `Close`，不表示缓冲区已读空。
-- 多个协程可以并发读取或写入，但应明确由谁负责最终关闭。
+- `Close` closes the stream's lifecycle signal; it does not directly close the internal data channel.
+- Writes are rejected after close, but consumers can still drain buffered values.
+- `Len` returns the current buffer length and does not include values being processed or waiting to be written.
+- `IsClosed` reports whether `Close` has been called, not whether the buffer is empty.
+- Multiple goroutines may read or write concurrently, but ownership of the final close operation should be explicit.
 
-## 流转换
+## Stream transformations
 
 ### Transform
 
@@ -220,7 +220,7 @@ squares := streaming.Transform[int, int](source, func(value int) int {
 })
 ```
 
-`Transform` 为每条源数据调用转换函数，并返回一个新的 Stream。源 Stream 关闭并读空后，目标 Stream 自动关闭。
+`Transform` calls the transformer for every source value and returns a new stream. The target stream closes automatically after the source stream is closed and drained.
 
 ### Filter
 
@@ -230,7 +230,7 @@ evens := streaming.Filter[int](source, func(value int) bool {
 })
 ```
 
-只有满足 Predicate 的数据会被写入目标 Stream。
+Only values for which the predicate returns `true` are written to the target stream.
 
 ### Merge
 
@@ -238,9 +238,9 @@ evens := streaming.Filter[int](source, func(value int) bool {
 merged := streaming.Merge[int](streamA, streamB, streamC)
 ```
 
-`Merge` 并发读取所有输入 Stream。当所有输入 Stream 都关闭并读空后，合并后的 Stream 自动关闭。不同输入之间的输出顺序不保证稳定，但同一个输入 Stream 内的数据顺序会被保留。
+`Merge` reads all input streams concurrently. The merged stream closes automatically after every input is closed and drained. Ordering between different inputs is not deterministic, but the order of values from each individual input is preserved.
 
-### 组合示例
+### Composition example
 
 ```go
 source := streaming.NewStream[int](8)
@@ -260,30 +260,30 @@ go func() {
 items, err := labels.(*streaming.StreamImpl[string]).ReadAll()
 ```
 
-由于 `Transform`、`Filter` 和 `Merge` 返回 `Stream[T]` 接口，通常直接循环读取即可。只有确实需要扩展方法时才应做具体类型断言。
+Because `Transform`, `Filter`, and `Merge` return the `Stream[T]` interface, consumers can normally read from them directly in a loop. Assert the concrete type only when an extension method is required.
 
-## 错误说明
+## Errors
 
-| 错误 | 触发场景 |
+| Error | When it is returned |
 | --- | --- |
-| `ErrStreamClosed` | Stream 已关闭，无法写入；或已关闭且没有剩余数据可读。 |
-| `ErrWouldBlock` | `TryWrite` 当前无法立即完成写入。 |
-| `context.DeadlineExceeded` | 超时读取或写入超过指定时间。 |
-| `context.Canceled` | 传入的 Context 被主动取消。 |
+| `ErrStreamClosed` | A write targets a closed stream, or a read targets a closed and drained stream. |
+| `ErrWouldBlock` | `TryWrite` cannot complete immediately. |
+| `context.DeadlineExceeded` | A timed read or write exceeds its deadline. |
+| `context.Canceled` | The supplied context is explicitly canceled. |
 
-包中保留了 `ErrTimeout`，但当前 `ReadWithTimeout` 和 `WriteWithTimeout` 实际返回的是 `context.DeadlineExceeded`。调用方应优先使用 `errors.Is` 判断 Context 错误。
+The package retains `ErrTimeout`, but `ReadWithTimeout` and `WriteWithTimeout` currently return `context.DeadlineExceeded`. Prefer `errors.Is` when checking context errors.
 
-## 最佳实践
+## Best practices
 
-- 明确生产者拥有关闭权，避免多个业务方互相等待。
-- 使用 `defer stream.Close()` 保证生产者退出时关闭 Stream。
-- 长生命周期任务优先使用 `ReadWithContext` 和 `WriteWithContext`。
-- 不要通过轮询 `IsClosed` 判断是否读取结束，应持续 `Read` 到 `ErrStreamClosed`。
-- 谨慎使用无缓冲 Stream；没有消费者时，生产者会阻塞。
-- `Transform` 和 `Filter` 的目标 Stream 是无缓冲的，必须及时消费下游数据，避免整条流水线阻塞。
-- Transformer 和 Predicate 应避免 Panic；当前工具函数不会自动恢复用户函数中的 Panic。
+- Give the producer explicit ownership of closing the stream to avoid coordination deadlocks.
+- Use `defer stream.Close()` so the producer closes the stream on every return path.
+- Prefer `ReadWithContext` and `WriteWithContext` for long-running tasks.
+- Do not poll `IsClosed` to detect completion; keep reading until `ErrStreamClosed`.
+- Use unbuffered streams carefully because a producer blocks when no consumer is available.
+- The target streams created by `Transform` and `Filter` are unbuffered, so consume downstream values promptly to avoid blocking the pipeline.
+- Transformer and predicate functions should not panic; the current helpers do not recover panics from user functions.
 
-## 测试
+## Testing
 
 ```bash
 go test ./streaming

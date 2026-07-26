@@ -1,60 +1,58 @@
 # Retriever SDK
 
-`retriever` 提供基于 Milvus 的数据写入与检索能力，当前包含稠密向量检索、BM25 全文检索和 Vector + BM25 混合检索三种实现。
+`retriever` provides Milvus-backed data ingestion and retrieval. It currently includes dense vector search, BM25 full-text search, and hybrid Vector + BM25 search.
 
-所有实现都支持 Collection 初始化、Partition 管理、批量写入、过滤检索、分页、删除、Upsert 和自定义 JSON 字段。`retriever/aisearch` 仍在开发中，当前没有可用实现。
+All implementations support collection initialization, partition management, batch writes, filtered retrieval, pagination, deletion, upsert, and custom JSON fields. `retriever/aisearch` is still under development and does not currently provide a usable implementation.
 
-## 功能概览
+## Features
 
-- `vector`：通过 `embedder.Embedder` 生成稠密向量并进行 ANN 检索。
-- `bm25`：使用 Milvus BM25 Function 和 Sparse Vector 进行关键词检索。
-- `hybrid`：同时执行向量与 BM25 检索，并使用 RRF 或 Weighted Reranker 融合结果。
-- 支持 Query、Vector、BM25 和 Hybrid 搜索模式。
-- 支持 Milvus Partition 的创建、加载、释放和删除。
-- 支持固定的 `fields` JSON 列及 JSON Path 索引。
-- 支持 Tag、标量字段和 JSON 字段过滤表达式。
+- `vector` generates dense vectors through `embedder.Embedder` and performs ANN search.
+- `bm25` uses a Milvus BM25 Function and sparse vectors for keyword search.
+- `hybrid` performs vector and BM25 searches together, then combines results with RRF or a weighted reranker.
+- Query, Vector, BM25, and Hybrid search modes.
+- Milvus partition creation, loading, release, and deletion.
+- A fixed `fields` JSON column with JSON-path indexes.
+- Filter expressions for tags, scalar fields, and JSON fields.
 
-## 目录结构
+## Directory structure
 
 ```text
 retriever/
-├── aisearch/               # 预留模块，仍在开发中
+├── aisearch/               # Reserved module; still under development
 └── milvus/
-    ├── config.go           # Milvus 连接配置
-    ├── model.go            # Element、Retrieval、SearchArgs 和 Fields
-    ├── filter.go           # 过滤表达式辅助函数
-    ├── fields_index.go     # fields JSON Path 索引
-    ├── vector/             # 稠密向量检索器
-    ├── bm25/               # BM25 检索器
-    └── hybrid/             # Vector + BM25 混合检索器
+    ├── config.go           # Milvus connection configuration
+    ├── model.go            # Element, Retrieval, SearchArgs, and Fields
+    ├── filter.go           # Filter-expression helpers
+    ├── fields_index.go     # JSON-path indexes for the fields column
+    ├── vector/             # Dense vector retriever
+    ├── bm25/               # BM25 retriever
+    └── hybrid/             # Vector + BM25 hybrid retriever
 ```
 
-## 安装与前置条件
+## Installation and prerequisites
 
 ```bash
 go get github.com/torrischen/goat/retriever/...
 ```
 
-运行前需要：
+Before using the retrievers, make sure you have:
 
-- 一个可访问的 Milvus 2.6 服务；
-- Vector 和 Hybrid 模式需要实现 `embedder.Embedder`；
-- Embedder 输出维度必须与 Retriever 的 `Dimension` 完全一致；
-- 如果使用 GPU 索引，需要 Milvus 环境支持对应索引类型。
+- Access to a Milvus 2.6 service.
+- An implementation of `embedder.Embedder` for Vector and Hybrid modes.
+- An embedder output dimension that exactly matches the retriever's `Dimension`.
+- Milvus support for the selected index type when GPU indexes are enabled.
 
-仓库中的 Milvus 部署参考位于 `thirdparty/vectordb/docker-compose.yml` 和 `thirdparty/vectordb/milvus.yaml`。
+## Choosing a retriever
 
-## 选择检索器
-
-| 实现 | 适用场景 | 是否需要 Embedder | 存储字段 |
+| Implementation | Best for | Embedder required | Stored columns |
 | --- | --- | --- | --- |
-| `vector` | 语义相似度、自然语言召回 | 是 | `id`、`tag`、`embedding`、`fields` |
-| `bm25` | 关键词、专有名词、精确文本召回 | 否 | `id`、`tag`、`content`、`sparse`、`fields` |
-| `hybrid` | 同时兼顾语义与关键词召回 | 是 | `id`、`tag`、`text`、`embedding`、`sparse`、`fields` |
+| `vector` | Semantic similarity and natural-language recall | Yes | `id`, `tag`, `embedding`, `fields` |
+| `bm25` | Keywords, proper nouns, and exact text recall | No | `id`, `tag`, `content`, `sparse`, `fields` |
+| `hybrid` | Combined semantic and keyword recall | Yes | `id`, `tag`, `text`, `embedding`, `sparse`, `fields` |
 
-## 快速开始：Hybrid Retriever
+## Quick start: Hybrid Retriever
 
-下面示例连接 Milvus、创建 Hybrid Retriever、写入数据并执行混合检索。
+The following example connects to Milvus, creates a Hybrid Retriever, inserts a document, and performs a hybrid search.
 
 ```go
 package main
@@ -86,7 +84,7 @@ func main() {
 		hybrid.NewHybridRetrieverConfig(
 			hybrid.WithRetrieverName("documents"),
 			hybrid.WithDimension(1536),
-			hybrid.WithLanguage(hybrid.BM25LanguageChinese),
+			hybrid.WithLanguage(hybrid.BM25LanguageEnglish),
 			hybrid.WithOnGPU(false),
 			hybrid.WithFieldsIndexes(
 				milvus.NewFieldsIndex("category", milvus.JSONFieldCastVarchar),
@@ -101,8 +99,14 @@ func main() {
 	}
 
 	const partition = "knowledge"
-	if err := retriever.AddPartitions(ctx, partition); err != nil {
+	exists, err := retriever.HasPartition(ctx, partition)
+	if err != nil {
 		log.Fatal(err)
+	}
+	if !exists {
+		if err := retriever.AddPartitions(ctx, partition); err != nil {
+			log.Fatal(err)
+		}
 	}
 	if err := retriever.LoadPartitions(ctx, partition); err != nil {
 		log.Fatal(err)
@@ -110,7 +114,7 @@ func main() {
 
 	_, err = retriever.AddElement(ctx, partition, milvus.NewElement(
 		1,
-		"goat 是一个面向 Go 的 Agent 与检索工具包。",
+		"goat is a Go toolkit for building agents and retrieval applications.",
 		[]string{"goat", "golang"},
 		milvus.NewFieldsFromJSONString(`{"category":"documentation","year":2026}`),
 	))
@@ -119,7 +123,7 @@ func main() {
 	}
 
 	results, err := retriever.Search(ctx, []string{partition}, &milvus.SearchArgs{
-		Text:       "Go Agent SDK",
+		Text:       "Go agent SDK",
 		Limit:      10,
 		SearchMode: milvus.SearchModeHybrid,
 		Filter: milvus.StringEquals(
@@ -142,9 +146,9 @@ func main() {
 }
 ```
 
-构造函数会按配置创建或复用 Collection。示例固定创建 `knowledge` Partition；如果 Partition 已存在，应先通过 `HasPartition` 判断，避免重复创建错误。
+The constructor creates a collection from the configuration or reuses a compatible existing collection. This example creates and loads the `knowledge` partition only when necessary.
 
-## Milvus 连接
+## Milvus connections
 
 ```go
 config := milvus.NewMilvusConfig(
@@ -156,7 +160,7 @@ config := milvus.NewMilvusConfig(
 client, err := milvus.NewMilvusClient(ctx, config)
 ```
 
-默认地址为 `http://localhost:19530`。如果多个 Retriever 共用一个连接，可先创建 `*milvusclient.Client`，再使用各实现的 `WithMilvus` 构造函数。
+The default address is `http://localhost:19530`. To share one connection across multiple retrievers, create a `*milvusclient.Client` first and use each implementation's `WithMilvus` constructor.
 
 ```go
 vectorRetriever, err := vector.NewMilvusRetrieverWithMilvus(ctx, client, embedder, vectorConfig)
@@ -164,31 +168,31 @@ bm25Retriever, err := bm25.NewMilvusBM25RetrieverWithMilvus(ctx, client, bm25Con
 hybridRetriever, err := hybrid.NewMilvusHybridRetrieverWithMilvus(ctx, client, embedder, hybridConfig)
 ```
 
-使用共享 Client 时由调用方负责在不再使用后关闭连接。
+When retrievers share a client, the caller is responsible for closing it after all retrievers have finished using it.
 
-## 数据模型
+## Data model
 
 ### Element
 
-`Element` 是写入 Retriever 的统一数据结构：
+`Element` is the common data type accepted by every retriever:
 
 ```go
 element := milvus.NewElement(
 	1001,
-	"需要写入并用于检索的文本",
+	"Text to store and retrieve.",
 	[]string{"manual", "golang"},
 	milvus.NewFieldsFromJSONString(`{"author":"team-a","year":2026}`),
 )
 ```
 
-| 字段 | 说明 |
+| Field | Description |
 | --- | --- |
-| `ID` | 调用方提供的 Int64 主键。 |
-| `TextToEmbed` | Vector 模式用于生成 Embedding；BM25 模式作为全文内容；Hybrid 模式同时用于两者。 |
-| `Tag` | 字符串数组，可用于分类和过滤。 |
-| `Fields` | 保存到固定 `fields` JSON 列的自定义数据。 |
+| `ID` | An Int64 primary key supplied by the caller. |
+| `TextToEmbed` | Embedded in Vector mode, stored as full text in BM25 mode, and used for both in Hybrid mode. |
+| `Tag` | A string array available for classification and filtering. |
+| `Fields` | Custom data stored in the fixed `fields` JSON column. |
 
-也可以通过 `SetField` 和 `GetField` 操作单个自定义字段。
+Use `SetField` and `GetField` to modify or read individual custom fields.
 
 ### Retrieval
 
@@ -202,16 +206,16 @@ type Retrieval struct {
 }
 ```
 
-- Vector、BM25 和 Hybrid 检索结果的分值位于 `Distance`。
-- BM25 与 Hybrid 结果会在 `Content` 中返回原始文本。
-- 纯 Vector Collection 不保存原始文本，因此 `Content` 为空。
-- Query 模式不进行相似度计算，`Distance` 不代表检索分值。
+- Scores from Vector, BM25, and Hybrid searches are returned in `Distance`.
+- BM25 and Hybrid results return the original text in `Content`.
+- A pure Vector collection does not store the original text, so `Content` is empty.
+- Query mode does not compute similarity, so `Distance` does not represent a relevance score.
 
-`Retrievals` 提供 `Len`、`Index`、`Max` 和 `Min` 辅助方法。检索结果由 Milvus 按相关性顺序返回，`Max` 返回首项，`Min` 返回末项。
+`Retrievals` provides `Len`, `Index`, `Max`, and `Min` helpers. Milvus returns search results in relevance order; `Max` returns the first result and `Min` returns the last.
 
 ## Fields JSON
 
-所有自定义字段都存储在固定的 `fields` JSON 列中。
+Every custom field is stored in the fixed `fields` JSON column.
 
 ```go
 fields := milvus.NewFields()
@@ -226,22 +230,22 @@ fromStruct := milvus.NewFieldsFromObject(struct {
 }{Category: "guide"})
 ```
 
-`Fields` 中的值应当可以被 JSON 序列化。构造函数序列化失败时会记录日志并返回 `nil`，调用方应避免传入 Channel、函数等不支持的类型。
+Values in `Fields` must be JSON serializable. If a constructor cannot serialize a value, it logs the error and returns `nil`. Do not pass unsupported values such as channels or functions.
 
-### JSON Path
+### JSON paths
 
-通过 `FieldsPath` 构造指向 `fields` 列的 Milvus JSON Path：
+Use `FieldsPath` to build a Milvus JSON path into the `fields` column:
 
 ```go
 milvus.FieldsPath("year")             // fields["year"]
 milvus.FieldsPath("metadata", "lang") // fields["metadata"]["lang"]
 ```
 
-字段名只能使用当前索引实现支持的安全名称。不要直接拼接来自用户输入的字段路径。
+Field names must satisfy the safe-name rules supported by the index implementation. Never construct field paths directly from untrusted user input.
 
-### JSON 字段索引
+### JSON field indexes
 
-可以在 Retriever 初始化时声明索引：
+Declare indexes while initializing a retriever:
 
 ```go
 milvus.NewFieldsIndex("category", milvus.JSONFieldCastVarchar)
@@ -251,17 +255,17 @@ milvus.NewFieldsPathIndex(
 )
 ```
 
-支持的 Cast 类型：
+Supported cast types:
 
 - `JSONFieldCastBool`
 - `JSONFieldCastDouble`
 - `JSONFieldCastVarchar`
 
-Vector 使用 `WithAutoIndexFields(true)`，BM25 和 Hybrid 使用 `WithFieldsAutoIndex(true)`，可在写入数据时根据 `Fields` 自动发现并创建索引。生产环境更建议通过 `WithFieldsIndexes` 显式声明，避免数据类型变化导致意外索引。
+Vector retrievers use `WithAutoIndexFields(true)`, while BM25 and Hybrid retrievers use `WithFieldsAutoIndex(true)`, to discover fields and create indexes from `Fields` during writes. In production, prefer explicit declarations through `WithFieldsIndexes` so changing data types cannot create unexpected indexes.
 
-## 过滤表达式
+## Filter expressions
 
-### 标量过滤
+### Scalar filters
 
 ```go
 filter := milvus.IntGreaterThan(milvus.FieldsPath("year"), 2024)
@@ -269,15 +273,15 @@ filter = milvus.StringEquals(milvus.FieldsPath("status"), "published")
 filter = milvus.StringLike(milvus.FieldsPath("title"), "%goat%")
 ```
 
-### 集合过滤
+### Collection filters
 
 ```go
 filter := milvus.IntIn(milvus.FieldsPath("category_id"), []int64{1, 2, 3})
-filter = milvus.StringIn(milvus.FieldsPath("lang"), []string{"zh", "en"})
+filter = milvus.StringIn(milvus.FieldsPath("lang"), []string{"en", "fr"})
 filter = milvus.ArrayContainsAny(milvus.ColumnTag, []string{"golang", "agent"})
 ```
 
-### 组合过滤
+### Combined filters
 
 ```go
 filter := milvus.And([]milvus.RetrieveFilterOption{
@@ -291,9 +295,9 @@ filter = milvus.Or([]milvus.RetrieveFilterOption{
 })
 ```
 
-`RetrieveFilterOption` 本质上是 Milvus 表达式字符串。辅助函数会处理字符串字面量转义，但字段路径仍应由可信代码控制。
+`RetrieveFilterOption` is a Milvus expression string. The helper functions escape string literals, but field paths must still come from trusted application code.
 
-## 搜索参数与模式
+## Search arguments and modes
 
 ```go
 type SearchArgs struct {
@@ -307,31 +311,31 @@ type SearchArgs struct {
 }
 ```
 
-| 字段 | 说明 |
+| Field | Description |
 | --- | --- |
-| `Text` | 用于 Embedding 或 BM25 的查询文本。 |
-| `Limit` | 返回条数；非正数时内部搜索默认使用 `8`。 |
-| `Offset` | 分页偏移量。 |
-| `Filter` | Milvus 过滤表达式；零值表示不过滤。 |
-| `OutputFields` | 需要从 `fields` JSON 中返回的字段名。 |
-| `SearchMode` | Query、Vector、BM25、Hybrid 或 Auto。 |
-| `RerankWeights` | Hybrid 模式的 Weighted Reranker 权重；为空时使用 RRF。 |
+| `Text` | Query text used for embedding or BM25. |
+| `Limit` | Number of results. The internal search default is `8` when this value is not positive. |
+| `Offset` | Pagination offset. |
+| `Filter` | Milvus filter expression. The zero value disables filtering. |
+| `OutputFields` | Field names to return from the `fields` JSON column. |
+| `SearchMode` | Query, Vector, BM25, Hybrid, or Auto. |
+| `RerankWeights` | Weights for the Hybrid weighted reranker. An empty slice uses RRF. |
 
-可用模式：
+Available modes:
 
-- `SearchModeQuery`：只按 Filter 查询，不计算相似度。
-- `SearchModeVector`：使用稠密向量搜索。
-- `SearchModeBM25`：使用全文 BM25 搜索。
-- `SearchModeHybrid`：融合 Vector 与 BM25 结果。
-- `SearchModeAuto`：使用当前 Retriever 的默认搜索模式。
+- `SearchModeQuery` queries only by filter and does not calculate similarity.
+- `SearchModeVector` performs dense vector search.
+- `SearchModeBM25` performs full-text BM25 search.
+- `SearchModeHybrid` combines Vector and BM25 results.
+- `SearchModeAuto` uses the current retriever's default mode.
 
-当 `SearchModeAuto` 且 `Text` 非空时，Vector Retriever 默认使用 Vector、BM25 Retriever 默认使用 BM25、Hybrid Retriever 默认使用 Hybrid；当参数为空或 `Text` 为空时，Auto 会退化为 Query。各 Retriever 只支持与自身 Collection Schema 兼容的模式。
+With `SearchModeAuto` and non-empty `Text`, a Vector Retriever defaults to Vector, a BM25 Retriever defaults to BM25, and a Hybrid Retriever defaults to Hybrid. Auto falls back to Query when the arguments or `Text` are empty. Each retriever supports only modes compatible with its collection schema.
 
-`SimilaritySearch` 是对 `Search` 的兼容入口，推荐新代码直接使用 `Search` 以显式选择模式。
+`SimilaritySearch` remains as a compatibility entry point for `Search`. New code should call `Search` directly to select a mode explicitly.
 
 ## Vector Retriever
 
-### 配置
+### Configuration
 
 ```go
 config := vector.NewMilvusRetrieverConfig(
@@ -348,24 +352,24 @@ config := vector.NewMilvusRetrieverConfig(
 )
 ```
 
-主要默认值：Collection 名为 `default_collection`、维度 `512`、不覆盖已有 Collection、GPU 索引开启、Fields 自动索引关闭。
+The main defaults are collection name `default_collection`, dimension `512`, no overwrite, GPU indexes enabled, and automatic `Fields` indexing disabled.
 
-### 构造
+### Construction
 
 ```go
 retriever, err := vector.NewMilvusRetrieverWithConfig(ctx, embedder, config, milvusConfig)
 ```
 
-Vector Retriever 额外提供 `Query`，可以读取 ID、Tag、Embedding 和 Fields 原始数据；通用结果检索优先使用 `Search`。
+The Vector Retriever also provides `Query` for reading raw ID, Tag, Embedding, and Fields data. Prefer `Search` for general result retrieval.
 
 ## BM25 Retriever
 
-BM25 Retriever 不需要 Embedder：
+The BM25 Retriever does not require an embedder:
 
 ```go
 config := bm25.NewBM25RetrieverConfig(
 	bm25.WithRetrieverName("keyword_documents"),
-	bm25.WithLanguage(bm25.BM25LanguageChinese),
+	bm25.WithLanguage(bm25.BM25LanguageEnglish),
 	bm25.WithMaxTextLength(4096),
 	bm25.WithDropRatio(0.2),
 	bm25.WithOverwrite(false),
@@ -375,7 +379,7 @@ config := bm25.NewBM25RetrieverConfig(
 retriever, err := bm25.NewMilvusBM25RetrieverWithConfig(ctx, config, milvusConfig)
 ```
 
-可用语言包括 English、Chinese、Japanese 和 Korean。当前默认语言为 Japanese，中文数据应显式设置 `BM25LanguageChinese`。
+Available analyzers include English, Chinese, Japanese, and Korean. The current default is Japanese, so always set the language explicitly when indexing other languages.
 
 ## Hybrid Retriever
 
@@ -383,7 +387,7 @@ retriever, err := bm25.NewMilvusBM25RetrieverWithConfig(ctx, config, milvusConfi
 config := hybrid.NewHybridRetrieverConfig(
 	hybrid.WithRetrieverName("hybrid_documents"),
 	hybrid.WithDimension(1536),
-	hybrid.WithLanguage(hybrid.BM25LanguageChinese),
+	hybrid.WithLanguage(hybrid.BM25LanguageEnglish),
 	hybrid.WithOnGPU(false),
 )
 
@@ -395,22 +399,22 @@ retriever, err := hybrid.NewMilvusHybridRetrieverWithConfig(
 )
 ```
 
-Hybrid 模式默认使用 RRF 融合结果。需要控制向量和关键词权重时：
+Hybrid mode combines results with RRF by default. To control the relative vector and keyword weights, supply a weighted reranker configuration:
 
 ```go
 results, err := retriever.Search(ctx, partitions, &milvus.SearchArgs{
 	Text:          "query text",
 	Limit:         10,
 	SearchMode:    milvus.SearchModeHybrid,
-	RerankWeights: []float64{0.8, 0.2}, // vector, BM25
+	RerankWeights: []float64{0.8, 0.2}, // Vector, BM25
 })
 ```
 
-权重顺序与内部请求顺序一致：第一项是 Vector，第二项是 BM25。
+Weight order matches the internal request order: Vector first and BM25 second.
 
-## Partition 管理
+## Partition management
 
-三种 Retriever 提供一致的 Partition API：
+All three retrievers provide the same partition-management API:
 
 ```go
 exists, err := retriever.HasPartition(ctx, "tenant_a")
@@ -424,12 +428,12 @@ err = retriever.ReleasePartitions(ctx, "tenant_a")
 err = retriever.DeletePartitions(ctx, "tenant_a")
 ```
 
-- 写入前应确保目标 Partition 已创建；检索前还应确保目标 Partition 已加载。
-- `milvus.DefaultPartition` 的值为 `_default`。
-- 删除 Partition 前应先释放，并确认没有仍需保留的数据。
-- Partition 适合租户或数据域隔离，不建议为每条数据创建独立 Partition。
+- Create a target partition before writing and load it before searching.
+- `milvus.DefaultPartition` is `_default`.
+- Release a partition before deleting it, and verify that it contains no data you still need.
+- Partitions are suitable for tenant or data-domain isolation; do not create one partition per record.
 
-## 写入、更新与删除
+## Writing, updating, and deleting
 
 ```go
 id, err := retriever.AddElement(ctx, partition, element)
@@ -443,13 +447,13 @@ err = retriever.UpsertElement(ctx, partition, updatedElement)
 err = retriever.DeleteElement(ctx, partition, []int64{1001, 1002})
 ```
 
-建议使用 `AddElements` 批量写入以减少网络往返。调用方负责保证同一批次 ID 和数据内容符合业务约束。
+Prefer `AddElements` for batch ingestion to reduce network round trips. The caller is responsible for ensuring that IDs and document contents satisfy application constraints within each batch.
 
-## Collection 生命周期
+## Collection lifecycle
 
-所有 Retriever Config 都支持 `WithOverwrite(true)`。启用后构造 Retriever 可能删除并重建同名 Collection，会造成数据丢失，只应在测试、初始化或明确重建索引时使用。
+Every retriever configuration supports `WithOverwrite(true)`. When enabled, constructing a retriever may drop and recreate an existing collection with the same name, destroying its data. Use this option only in tests, initialization workflows, or an intentional index rebuild.
 
-也可以显式销毁 Collection：
+You can also destroy a collection explicitly:
 
 ```go
 err := vector.TruncateAndDestroy(ctx, client, "vector_documents")
@@ -457,33 +461,33 @@ err := bm25.TruncateAndDestroy(ctx, client, "keyword_documents")
 err := hybrid.TruncateAndDestroy(ctx, client, "hybrid_documents")
 ```
 
-这些函数是破坏性操作，生产环境调用前必须增加权限控制和二次确认。
+These functions are destructive. Add authorization and explicit confirmation before exposing them in production.
 
-## 最佳实践
+## Best practices
 
-- Retriever 的 `Dimension` 必须与 Embedder 实际输出维度一致。
-- 中文 BM25 或 Hybrid 数据显式设置 Chinese Analyzer，不要依赖默认语言。
-- 生产环境默认使用 `WithOverwrite(false)`。
-- 先声明常用 JSON 字段索引，再对这些字段执行高频过滤。
-- 避免在同一 JSON Path 中混用字符串、数字和布尔类型。
-- 使用稳定、唯一的 Int64 ID，以便安全 Upsert 和删除。
-- 批量写入后，根据业务一致性要求等待 Milvus 数据可见再立即检索。
-- 使用 Context Timeout 限制连接、索引创建、加载和检索耗时。
-- 不要把未经校验的用户输入直接作为字段路径或原始 Milvus Filter。
+- The retriever's `Dimension` must exactly match the embedder's output dimension.
+- Select the analyzer that matches your BM25 or Hybrid document language; do not rely on the default.
+- Keep `WithOverwrite(false)` in production.
+- Declare frequently used JSON field indexes before applying high-volume filters to those fields.
+- Do not mix string, numeric, and Boolean values at the same JSON path.
+- Use stable, unique Int64 IDs so upserts and deletions are safe.
+- After batch ingestion, wait for Milvus visibility according to your application's consistency requirements before searching immediately.
+- Use context deadlines to limit connection, index creation, load, and search operations.
+- Never use unvalidated user input directly as a field path or raw Milvus filter.
 
-## 测试与编译检查
+## Testing and compile checks
 
-Retriever 当前依赖外部 Milvus 服务，仓库内主要通过编译检查验证：
+Retriever integration depends on an external Milvus service, so the repository primarily performs compile checks:
 
 ```bash
 go test ./retriever/...
 ```
 
-端到端验证还应覆盖：
+End-to-end validation should also cover:
 
-1. 创建独立测试 Collection；
-2. 创建并加载 Partition；
-3. 写入固定测试数据；
-4. 分别执行 Query、Vector、BM25 和 Hybrid 检索；
-5. 验证 Filter、Fields 和排序结果；
-6. 删除测试 Collection。
+1. Creating an isolated test collection.
+2. Creating and loading a partition.
+3. Inserting deterministic test documents.
+4. Running Query, Vector, BM25, and Hybrid searches.
+5. Verifying filters, fields, and result ordering.
+6. Deleting the test collection.

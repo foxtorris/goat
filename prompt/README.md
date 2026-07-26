@@ -1,8 +1,8 @@
 # Prompt Builder
 
-`prompt` 提供一个轻量的链式 API，用于把 Role、Objective、Context、Instructions、Constraints、Input、Output Format 和 Examples 组织成顺序稳定的 Markdown prompt。
+`prompt` provides a lightweight fluent API for organizing Role, Objective, Context, Instructions, Constraints, Input, Output Format, and Examples into a Markdown prompt with a stable section order.
 
-## 快速开始
+## Quick start
 
 ```go
 package main
@@ -15,49 +15,49 @@ import (
 
 func main() {
 	p := prompt.New().
-		Role("你是一名资深 Go 工程师").
-		Objective("审查输入代码并指出高风险问题").
-		Context("代码运行在支付服务的请求链路中").
+		Role("You are a senior Go engineer").
+		Objective("Review the input code and identify high-risk issues").
+		Context("The code runs in the request path of a payment service").
 		Instructions(
-			"优先检查正确性和并发安全",
-			"每个问题都给出可执行的修复建议",
+			"Prioritize correctness and concurrency safety",
+			"Provide an actionable fix for every issue",
 		).
-		Constraints("不要改变公开 API", "使用中文回答").
+		Constraints("Do not change the public API", "Respond in English").
 		Input("func handle() {}").
-		OutputFormat("使用 Markdown checklist").
+		OutputFormat("Use a Markdown checklist").
 		Build()
 
 	fmt.Println(p)
 }
 ```
 
-输出：
+Output:
 
 ```markdown
 ## Role
-你是一名资深 Go 工程师
+You are a senior Go engineer
 
 ## Objective
-审查输入代码并指出高风险问题
+Review the input code and identify high-risk issues
 
 ## Context
-代码运行在支付服务的请求链路中
+The code runs in the request path of a payment service
 
 ## Instructions
-- 优先检查正确性和并发安全
-- 每个问题都给出可执行的修复建议
+- Prioritize correctness and concurrency safety
+- Provide an actionable fix for every issue
 
 ## Constraints
-- 不要改变公开 API
-- 使用中文回答
+- Do not change the public API
+- Respond in English
 
 ## Input
 func handle() {}
 
 ## Output Format
-使用 Markdown checklist
+Use a Markdown checklist
 ```
 
-`Role`、`Objective`、`Context`、`Input` 和 `OutputFormat` 再次调用时会覆盖旧值；`Instruction(s)`、`Constraint(s)` 和 `Example` 会按调用顺序追加。空白内容会被忽略。
+Repeated calls to `Role`, `Objective`, `Context`, `Input`, or `OutputFormat` replace the previous value. Calls to `Instruction(s)`, `Constraint(s)`, and `Example` append values in call order. Blank content is ignored.
 
-可以通过 `Section(title, content)` 和 `ListSection(title, items...)` 追加自定义段落；自定义段落会按调用顺序放在标准段落之后。`String()` 与 `Build()` 等价。
+Use `Section(title, content)` and `ListSection(title, items...)` to append custom sections. Custom sections appear after the standard sections in call order. `String()` is equivalent to `Build()`.

@@ -1,0 +1,279 @@
+<div align="center">
+  <h1>goat 🐐</h1>
+  <p><strong>A modular Go toolkit for building tool-using AI agents and retrieval pipelines.</strong></p>
+  <p>
+    <a href="https://go.dev/"><img alt="Go 1.25.8+" src="https://img.shields.io/badge/Go-1.25.8%2B-00ADD8?logo=go&amp;logoColor=white"></a>
+    <a href="https://pkg.go.dev/github.com/torrischen/goat/agent/originagent"><img alt="Go Reference" src="https://pkg.go.dev/badge/github.com/torrischen/goat/agent/originagent.svg"></a>
+    <a href="LICENSE"><img alt="BSD 3-Clause License" src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg"></a>
+  </p>
+  <p>
+    <a href="#features">Features</a> ·
+    <a href="#quick-start">Quick start</a> ·
+    <a href="#packages">Packages</a> ·
+    <a href="#documentation">Documentation</a>
+  </p>
+</div>
+
+`goat` combines an asynchronous agent runtime, persistent conversation memory, extensible tools, Milvus retrieval, OpenAI-compatible embeddings, structured prompt building, and typed streams in one Go module. The agent layer is built on [CloudWeGo Eino](https://github.com/cloudwego/eino) and accepts any `model.AgenticModel` implementation.
+
+## Features
+
+- **Native tool calling** — execute one or more model-selected tools in an agent loop.
+- **Model agnostic** — use Eino adapters for OpenAI, Azure OpenAI, Claude, Gemini, or another compatible provider.
+- **Persistent memory** — choose RAM, JSONL files, SQLite, or MySQL and resume a conversation by `MemoryUID`.
+- **Context compression** — compact long tool histories with precise, aggressive, or no-model discard strategies.
+- **Extensible tools** — register Go functions, MCP tools, Go shared libraries, or gRPC plugins.
+- **Planning and skills** — expose built-in planning tools and load skills on demand from a `skills/` directory.
+- **Streaming execution** — consume typed tool and final-answer steps, token usage, callbacks, and final-answer webhooks.
+- **Multimodal input and output** — pass image URLs, Base64 data, or binary images through supported models and tools.
+- **Milvus retrieval** — use dense vector, BM25, or hybrid retrieval with filters, partitions, and JSON fields.
+- **Reusable primitives** — OpenAI-compatible embeddings, a fluent prompt builder, and concurrent generic streams.
+
+## Packages
+
+| Package | Purpose |
+| --- | --- |
+| [`agent/originagent`](agent/originagent) | Asynchronous native function-calling agent runtime. |
+| [`agent/common`](agent/common) | Agent, tool, memory, step, callback, and multimodal contracts. |
+| [`agent/memory`](agent/memory) | RAM, file, SQLite, and MySQL memory backends. |
+| [`agent/tools`](agent/tools) | Planning, skills, terminal, and shell tools. |
+| [`agent/toolplugin`](agent/toolplugin) | Go shared-library and gRPC tool plugins. |
+| [`embedder/openai`](embedder/openai) | OpenAI-compatible embedding client. |
+| [`retriever/milvus`](retriever/milvus) | Vector, BM25, and hybrid Milvus retrievers. |
+| [`prompt`](prompt) | Fluent Markdown prompt builder. |
+| [`streaming`](streaming) | Concurrent, type-safe generic streams. |
+
+```mermaid
+flowchart LR
+    App[Application] --> Agent[Agent runtime]
+    Agent --> Model[Eino AgenticModel]
+    Agent --> Tools[Go · MCP · gRPC · shared-library tools]
+    Agent --> Memory[RAM · files · SQLite · MySQL]
+    Agent --> Steps[Typed step stream]
+    App --> Retriever[Retriever]
+    Retriever --> Milvus[(Milvus)]
+    Retriever --> Embedder[Embedder]
+```
+
+## Requirements
+
+- Go **1.25.8** or newer.
+- Credentials for the model or embedding provider you choose.
+- Milvus **2.6** only when using the retriever packages.
+- CGO and a C compiler when using the SQLite memory backend.
+
+## Installation
+
+Install only the packages your application needs:
+
+```bash
+go get github.com/torrischen/goat/agent/originagent
+go get github.com/torrischen/goat/agent/memory/ram
+go get github.com/cloudwego/eino-ext/components/model/agenticopenai
+```
+
+Optional components can be added independently:
+
+```bash
+go get github.com/torrischen/goat/retriever/milvus/hybrid
+go get github.com/torrischen/goat/prompt
+go get github.com/torrischen/goat/streaming
+```
+
+## Quick start
+
+Set an API key:
+
+```bash
+export OPENAI_API_KEY="your-api-key"
+```
+
+Create and run an agent:
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+
+	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
+	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/agent/memory/ram"
+	"github.com/torrischen/goat/agent/originagent"
+	"github.com/torrischen/goat/streaming"
+)
+
+func main() {
+	ctx := context.Background()
+
+	llm, err := agenticopenai.NewResponsesModel(ctx, &agenticopenai.ResponsesConfig{
+		APIKey: os.Getenv("OPENAI_API_KEY"),
+		Model:  "gpt-5.2",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 128 means an approximately 128K-token model context window.
+	agent := originagent.NewAgent(llm, 128, ram.NewRAMMemory())
+
+	memoryUID, steps, err := agent.Do(ctx, &common.AgentDoArgs{
+		UserInput: common.AgentUserInput{
+			Text: "Explain why typed streams are useful in Go in three bullets.",
+		},
+		MaxStep: 8,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for {
+		step, err := steps.ReadWithContext(ctx)
+		switch {
+		case errors.Is(err, streaming.ErrStreamClosed):
+			fmt.Printf("\nConversation: %s\n", memoryUID)
+			return
+		case err != nil:
+			log.Fatal(err)
+		case step.IsFinalAnswer:
+			fmt.Println(step.Observation)
+		}
+	}
+}
+```
+
+`Agent.Do` stores the user message, starts the agent loop in the background, and immediately returns a conversation ID plus a stream for that run. Consume the stream until `streaming.ErrStreamClosed` before starting another turn with the same `MemoryUID`.
+
+### Add a custom tool
+
+Tools use JSON Schema parameters and return text or multimodal results:
+
+```go
+weatherTool := common.NewDefaultTool(
+	"get_weather",
+	"Return the current weather for a city.",
+	common.NewToolParameters(common.ToolProperty{
+		Name:        "city",
+		Type:        "string",
+		Required:    true,
+		Description: "City name, for example Tokyo.",
+	}),
+	func(_ *common.AgentContext, input map[string]any) common.ToolResult {
+		city, ok := input["city"].(string)
+		if !ok || city == "" {
+			return common.NewDefaultToolResult("city must be a non-empty string")
+		}
+		return common.NewDefaultToolResult(
+			fmt.Sprintf("The weather in %s is clear and 22°C.", city),
+		)
+	},
+)
+
+agent.AddTool(ctx, weatherTool)
+```
+
+Use `ToolProperty.Items` and `ToolProperty.Properties` for array and nested-object schemas. Tool names are normalized for model compatibility, and duplicate names receive a numeric suffix.
+
+### Enable planning, compression, and parallel tools
+
+```go
+_, planningSteps, err := agent.Do(ctx, &common.AgentDoArgs{
+	UserInput:      common.AgentUserInput{Text: "Analyze this project and propose a refactor."},
+	MaxStep:        12,
+	EnablePlanning: true,
+	Compress:       true,
+	CompressionOptions: common.CompressionOptions{
+		Strategy:       common.CompressionStrategyPrecise,
+		RecentMessages: 12,
+	},
+	ToolExecutionOptions: &common.ToolExecutionOptions{
+		EnableParallel: true,
+		MaxConcurrency: 4,
+	},
+})
+```
+
+Consume `planningSteps` in the same way as the quick-start stream; the run is complete when the stream closes.
+
+## Conversation memory
+
+Pass a memory implementation to `originagent.NewAgent`. Passing `nil` uses file memory in `data/conversations`.
+
+| Backend | Constructor | Best suited for |
+| --- | --- | --- |
+| RAM | `ram.NewRAMMemory()` | Tests and short-lived processes. |
+| Files | `filemem.NewFileMemory("")` | Simple local JSONL persistence. |
+| SQLite | `sqlite.NewSQLiteMemory("")` | Durable single-node applications. |
+| MySQL | `mysql.NewMySQLMemory(...)` | Shared, multi-process deployments. |
+
+Continue a completed conversation by passing the returned ID into the next run:
+
+```go
+_, nextSteps, err := agent.Do(ctx, &common.AgentDoArgs{
+	MemoryUID: memoryUID,
+	UserInput: common.AgentUserInput{Text: "Summarize our conversation."},
+})
+```
+
+## Retrieval
+
+The Milvus integration exposes three retrieval strategies behind similar collection, partition, write, search, upsert, and delete APIs:
+
+| Retriever | Search | Embedder required |
+| --- | --- | --- |
+| [`vector`](retriever/milvus/vector) | Dense semantic similarity | Yes |
+| [`bm25`](retriever/milvus/bm25) | Keyword/full-text relevance | No |
+| [`hybrid`](retriever/milvus/hybrid) | Vector + BM25 with RRF or weighted reranking | Yes |
+
+Retrievers support scalar and JSON-path filters, custom JSON fields and indexes, pagination, and partition management. See the [Retriever guide](retriever/README.md) for a complete hybrid-search example and operational notes.
+
+## Model providers
+
+`originagent.NewAgent` accepts Eino's `model.AgenticModel` interface. Provider authentication, endpoints, and provider-specific options stay in the selected Eino adapter:
+
+- `agenticopenai` for OpenAI Responses and Azure OpenAI.
+- `agenticclaude` for Claude.
+- `agenticgemini` for Gemini and Vertex AI.
+
+See the [Agent SDK guide](agent/README.md) for provider setup, MCP registration, skills, multimodal messages, callbacks, webhooks, and plugin loading.
+
+## Documentation
+
+- [Agent SDK guide](agent/README.md)
+- [Tool array and nested parameter schemas](agent/common/ARRAY_PARAMETERS.md)
+- [Tool plugin cookbook](agent/toolplugin/README.md)
+- [Retriever SDK guide](retriever/README.md)
+- [Prompt builder guide](prompt/README.md)
+- [Streaming SDK guide](streaming/README.md)
+- [Integration examples](example)
+
+## Security
+
+Model-generated tool arguments are untrusted input. Validate parameters, enforce authorization and idempotency for side effects, apply timeouts, and run privileged tools in a sandbox. In particular, `agent/tools.Terminal` and `agent/tools.ShellCommand` execute commands with the permissions of the current process and should only be registered in controlled environments.
+
+Never commit provider credentials or include them directly in tool output, logs, or conversation memory.
+
+## Development
+
+```bash
+git clone https://github.com/torrischen/goat.git
+cd goat
+go mod download
+go test ./...
+```
+
+When changing the gRPC plugin protocol, regenerate its Go bindings with:
+
+```bash
+make proto
+```
+
+Issues and pull requests are welcome. Please format Go changes with `gofmt` and include tests for new behavior.
+
+## License
+
+`goat` is distributed under the [BSD 3-Clause License](LICENSE).
