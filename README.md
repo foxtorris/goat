@@ -265,6 +265,7 @@ See the [Agent SDK guide](agent/README.md) for provider setup, MCP registration,
 - [Prompt builder guide](prompt/README.md)
 - [Streaming SDK guide](streaming/README.md)
 - [Integration examples](example)
+  - [Complex OpenAI agent (planning, parallel tools, callbacks, and streaming)](example/complex_agent)
 
 ## Security
 
