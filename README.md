@@ -221,7 +221,7 @@ Pass a `contextmgr.ContextManager` implementation to `originagent.NewAgent`. Pas
 | Backend | Constructor | Best suited for |
 | --- | --- | --- |
 | RAM | `ram.NewRAMContextManager()` | Tests and short-lived processes. |
-| Files | `file.NewFileContextManager("")` | Simple local atomic-file persistence with legacy JSONL migration. |
+| Files | `file.NewFileContextManager("")` | Simple local atomic-file persistence. |
 | SQLite | `sqlite.NewSQLiteContextManager("")` | Durable single-node applications. |
 | MySQL | `mysql.NewMysqlContextManager(...)` | Shared, multi-process deployments. |
 

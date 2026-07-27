@@ -1,10 +1,9 @@
 package file
 
 import (
-	"bufio"
 	"context"
 	"errors"
-	"io"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
-	"github.com/torrischen/goat/util"
 	"github.com/torrischen/goat/util/logging"
 
 	"github.com/bytedance/sonic"
@@ -305,8 +303,7 @@ func (m *FileContextManager) getFilePath(contextUID common.ContextUID) string {
 }
 
 // persistState writes committed history and the pending inbox together, so a
-// successful rename advances both atomically. Existing JSONL files are read by
-// loadState and migrated to this envelope on their next mutation.
+// successful rename advances both atomically.
 func (m *FileContextManager) persistState(contextUID common.ContextUID, state *conversationState) error {
 	filePath := m.getFilePath(contextUID)
 	tmpPath := filePath + ".tmp"
@@ -350,159 +347,21 @@ func (m *FileContextManager) loadState(contextUID common.ContextUID) (*conversat
 	}
 
 	var state conversationState
-	if err := sonic.UnmarshalString(trimmed, &state); err == nil && state.Version == conversationStateVersion {
-		if state.Messages == nil {
-			state.Messages = []*schema.AgenticMessage{}
-		}
-		if state.PendingMessages == nil {
-			state.PendingMessages = []*schema.AgenticMessage{}
-		}
-		return &state, true, nil
+	if err := sonic.UnmarshalString(trimmed, &state); err != nil {
+		return nil, false, fmt.Errorf("decode conversation state: %w", err)
 	}
-
-	// Backward compatibility: older conversations are one AgenticMessage per
-	// JSONL line. They are migrated to conversationState on the next write.
-	messages := make([]*schema.AgenticMessage, 0)
-	reader := bufio.NewReader(strings.NewReader(string(data)))
-	for {
-		line, readErr := reader.ReadString('\n')
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return nil, false, readErr
-		}
-		line = strings.TrimSpace(line)
-		if line != "" {
-			message, decodeErr := m.decodeMessage(line)
-			if decodeErr != nil {
-				return nil, false, decodeErr
-			}
-			messages = append(messages, message)
-		}
-		if errors.Is(readErr, io.EOF) {
-			break
-		}
+	if state.Version != conversationStateVersion {
+		return nil, false, fmt.Errorf(
+			"unsupported conversation state version %d (expected %d)",
+			state.Version,
+			conversationStateVersion,
+		)
 	}
-
-	return &conversationState{
-		Version:         conversationStateVersion,
-		Messages:        messages,
-		PendingMessages: []*schema.AgenticMessage{},
-	}, true, nil
-}
-
-type storedMessage struct {
-	Role             string         `json:"role"`
-	ReasoningContent string         `json:"reasoning_content,omitempty"`
-	Parts            []storedPart   `json:"parts"`
-	Metadata         map[string]any `json:"metadata,omitempty"`
-}
-
-type storedPart struct {
-	Type string `json:"type"`
-
-	// TextContent
-	Text string `json:"text,omitempty"`
-
-	// ImageURLContent
-	URL    string `json:"url,omitempty"`
-	Detail string `json:"detail,omitempty"`
-
-	// BinaryContent
-	MIMEType string `json:"mime_type,omitempty"`
-	Data     string `json:"data,omitempty"` // base64 encoded
-
-	// ToolCall
-	ID               string `json:"id,omitempty"`
-	ToolType         string `json:"tool_type,omitempty"`
-	ThoughtSignature string `json:"thought_signature,omitempty"`
-	FunctionCall     *struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function_call,omitempty"`
-
-	// ToolCallResponse
-	ToolCallID string `json:"tool_call_id,omitempty"`
-	Name       string `json:"name,omitempty"`
-	Content    string `json:"content,omitempty"`
-}
-
-func (m *FileContextManager) encodeMessage(msg *schema.AgenticMessage) (string, error) {
-	b, err := sonic.Marshal(msg)
-	if err != nil {
-		return "", err
+	if state.Messages == nil {
+		state.Messages = []*schema.AgenticMessage{}
 	}
-	return util.ByteToString(b), nil
-}
-
-func (m *FileContextManager) decodeMessage(line string) (*schema.AgenticMessage, error) {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return nil, errors.New("empty line")
+	if state.PendingMessages == nil {
+		state.PendingMessages = []*schema.AgenticMessage{}
 	}
-
-	var msg schema.AgenticMessage
-	if err := sonic.UnmarshalString(line, &msg); err == nil &&
-		msg.Role != "" &&
-		(len(msg.ContentBlocks) > 0 || !strings.Contains(line, `"parts"`)) {
-		return &msg, nil
-	}
-
-	var stored storedMessage
-	if err := sonic.UnmarshalString(line, &stored); err != nil {
-		return nil, err
-	}
-
-	converted := &schema.AgenticMessage{
-		Role:          legacyRoleToAgenticRole(stored.Role),
-		ContentBlocks: make([]*schema.ContentBlock, 0, len(stored.Parts)+1),
-	}
-	if stored.ReasoningContent != "" {
-		converted.ContentBlocks = append(converted.ContentBlocks, common.ReasoningBlock(stored.ReasoningContent))
-	}
-
-	for _, sp := range stored.Parts {
-		switch sp.Type {
-		case "text":
-			if converted.Role == schema.AgenticRoleTypeAssistant {
-				converted.ContentBlocks = append(converted.ContentBlocks, common.AssistantTextBlock(sp.Text))
-			} else {
-				converted.ContentBlocks = append(converted.ContentBlocks, common.TextBlock(sp.Text))
-			}
-		case "image_url":
-			converted.ContentBlocks = append(converted.ContentBlocks, common.ImageURLWithDetailBlock(sp.URL, sp.Detail))
-		case "binary":
-			converted.ContentBlocks = append(converted.ContentBlocks, common.Base64ImageBlock(sp.MIMEType, sp.Data))
-		case "tool_call":
-			if sp.FunctionCall != nil {
-				converted.ContentBlocks = append(converted.ContentBlocks, schema.NewContentBlock(&schema.FunctionToolCall{
-					CallID:    sp.ID,
-					Name:      sp.FunctionCall.Name,
-					Arguments: sp.FunctionCall.Arguments,
-				}))
-			}
-		case "tool_call_response":
-			converted.Role = schema.AgenticRoleTypeUser
-			converted.ContentBlocks = append(converted.ContentBlocks, schema.NewContentBlock(&schema.FunctionToolResult{
-				CallID: sp.ToolCallID,
-				Name:   sp.Name,
-				Content: []*schema.FunctionToolResultContentBlock{
-					{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: sp.Content}},
-				},
-			}))
-		default:
-			logging.Warnf("Unknown stored part type: %s", sp.Type)
-		}
-	}
-
-	return converted, nil
-}
-
-func legacyRoleToAgenticRole(role string) schema.AgenticRoleType {
-	switch role {
-	case "system":
-		return schema.AgenticRoleTypeSystem
-	case "ai":
-		return schema.AgenticRoleTypeAssistant
-	default:
-		return schema.AgenticRoleTypeUser
-	}
+	return &state, true, nil
 }
