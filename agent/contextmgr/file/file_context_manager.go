@@ -21,11 +21,19 @@ import (
 	"github.com/google/uuid"
 )
 
+const conversationStateVersion = 1
+
 // FileContextManager manages conversation context using file storage.
 type FileContextManager struct {
 	mu    sync.RWMutex
 	dir   string
-	cache map[common.ContextUID][]*schema.AgenticMessage
+	cache map[common.ContextUID]*conversationState
+}
+
+type conversationState struct {
+	Version         int                      `json:"version"`
+	Messages        []*schema.AgenticMessage `json:"messages"`
+	PendingMessages []*schema.AgenticMessage `json:"pending_messages,omitempty"`
 }
 
 var _ contextmgr.ContextManager = (*FileContextManager)(nil)
@@ -42,22 +50,21 @@ func NewFileContextManager(dir string) *FileContextManager {
 
 	return &FileContextManager{
 		dir:   dir,
-		cache: make(map[common.ContextUID][]*schema.AgenticMessage),
+		cache: make(map[common.ContextUID]*conversationState),
 	}
 }
 
 func (m *FileContextManager) InitNew(ctx context.Context) common.ContextUID {
 	contextUID := m.NewContextUID(ctx)
+	state := newConversationState()
 
 	m.mu.Lock()
-	m.cache[contextUID] = []*schema.AgenticMessage{}
-	m.mu.Unlock()
+	defer m.mu.Unlock()
 
-	// Create empty file
-	if err := m.persist(contextUID, []*schema.AgenticMessage{}); err != nil {
+	if err := m.persistState(contextUID, state); err != nil {
 		logging.Errorf("Failed to persist new conversation: %v", err)
 	}
-
+	m.cache[contextUID] = state
 	return contextUID
 }
 
@@ -65,66 +72,162 @@ func (m *FileContextManager) NewContextUID(_ context.Context) common.ContextUID 
 	return common.ContextUID(uuid.NewString())
 }
 
-func (m *FileContextManager) Append(ctx context.Context, contextUID common.ContextUID, message *schema.AgenticMessage) error {
+func (m *FileContextManager) Append(_ context.Context, contextUID common.ContextUID, message *schema.AgenticMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	messages, exists := m.cache[contextUID]
+	state, exists, err := m.stateLocked(contextUID)
+	if err != nil {
+		return err
+	}
 	if !exists {
-		// Try to load from disk
-		loaded, err := m.load(contextUID)
-		if err != nil {
-			return err
-		}
-		messages = loaded
+		state = newConversationState()
 	}
 
-	messages = append(messages, message)
-	m.cache[contextUID] = messages
-
-	// Persist to disk
-	return m.persist(contextUID, messages)
+	next := cloneConversationState(state)
+	next.Messages = append(next.Messages, message)
+	if err := m.persistState(contextUID, next); err != nil {
+		return err
+	}
+	m.cache[contextUID] = next
+	return nil
 }
 
-func (m *FileContextManager) GetAll(ctx context.Context, contextUID common.ContextUID) []*schema.AgenticMessage {
-	m.mu.RLock()
-	messages, exists := m.cache[contextUID]
-	m.mu.RUnlock()
+func (m *FileContextManager) GetAll(_ context.Context, contextUID common.ContextUID) []*schema.AgenticMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	if exists {
-		// Return a copy to prevent external modification
-		return common.CloneAgenticMessages(messages)
-	}
-
-	// Try to load from disk
-	loaded, err := m.load(contextUID)
+	state, exists, err := m.stateLocked(contextUID)
 	if err != nil {
 		logging.Errorf("Failed to load conversation %s: %v", contextUID, err)
 		return []*schema.AgenticMessage{}
 	}
-
-	m.mu.Lock()
-	m.cache[contextUID] = loaded
-	m.mu.Unlock()
-
-	return common.CloneAgenticMessages(loaded)
+	if !exists {
+		return []*schema.AgenticMessage{}
+	}
+	return common.CloneAgenticMessages(state.Messages)
 }
 
 func (m *FileContextManager) Len(ctx context.Context, contextUID common.ContextUID) int {
 	return len(m.GetAll(ctx, contextUID))
 }
 
-func (m *FileContextManager) Reset(ctx context.Context, contextUID common.ContextUID, messages []*schema.AgenticMessage) {
+func (m *FileContextManager) Reset(_ context.Context, contextUID common.ContextUID, messages []*schema.AgenticMessage) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.cache[contextUID] = messages
-	if err := m.persist(contextUID, messages); err != nil {
-		logging.Errorf("Failed to reset conversation: %v", err)
+	state, exists, err := m.stateLocked(contextUID)
+	if err != nil {
+		logging.Errorf("Failed to load conversation before reset: %v", err)
+		return
 	}
+	if !exists {
+		state = newConversationState()
+	}
+
+	next := cloneConversationState(state)
+	next.Messages = common.CloneAgenticMessages(messages)
+	if err := m.persistState(contextUID, next); err != nil {
+		logging.Errorf("Failed to reset conversation: %v", err)
+		return
+	}
+	m.cache[contextUID] = next
 }
 
-func (m *FileContextManager) Delete(ctx context.Context, contextUID common.ContextUID) error {
+func (m *FileContextManager) EnqueuePendingMessages(
+	_ context.Context,
+	contextUID common.ContextUID,
+	messages []*schema.AgenticMessage,
+) error {
+	if err := contextmgr.ValidatePendingMessages(messages); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state, exists, err := m.stateLocked(contextUID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return contextmgr.ErrContextNotFound
+	}
+	if len(state.Messages) > 0 && contextmgr.IsFinalAnswerMessage(state.Messages[len(state.Messages)-1]) {
+		return contextmgr.ErrConversationFinalized
+	}
+
+	next := cloneConversationState(state)
+	next.PendingMessages = append(next.PendingMessages, common.CloneAgenticMessages(messages)...)
+	if err := m.persistState(contextUID, next); err != nil {
+		return err
+	}
+	m.cache[contextUID] = next
+	return nil
+}
+
+func (m *FileContextManager) CommitTurn(
+	_ context.Context,
+	contextUID common.ContextUID,
+	turnMessages []*schema.AgenticMessage,
+) (*contextmgr.TurnCommitResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state, exists, err := m.stateLocked(contextUID)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, contextmgr.ErrContextNotFound
+	}
+
+	applied := common.CloneAgenticMessages(state.PendingMessages)
+	next := cloneConversationState(state)
+	next.Messages = append(next.Messages, common.CloneAgenticMessages(turnMessages)...)
+	next.Messages = append(next.Messages, applied...)
+	next.PendingMessages = nil
+	if err := m.persistState(contextUID, next); err != nil {
+		return nil, err
+	}
+	m.cache[contextUID] = next
+
+	return &contextmgr.TurnCommitResult{
+		AppliedPendingMessages: common.CloneAgenticMessages(applied),
+	}, nil
+}
+
+func (m *FileContextManager) CommitFinal(
+	_ context.Context,
+	contextUID common.ContextUID,
+	message *schema.AgenticMessage,
+) error {
+	if err := contextmgr.ValidateFinalMessage(message); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state, exists, err := m.stateLocked(contextUID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return contextmgr.ErrContextNotFound
+	}
+
+	next := cloneConversationState(state)
+	next.Messages = append(next.Messages, common.CloneAgenticMessages([]*schema.AgenticMessage{message})[0])
+	next.PendingMessages = nil
+	if err := m.persistState(contextUID, next); err != nil {
+		return err
+	}
+	m.cache[contextUID] = next
+	return nil
+}
+
+func (m *FileContextManager) Delete(_ context.Context, contextUID common.ContextUID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -134,8 +237,41 @@ func (m *FileContextManager) Delete(ctx context.Context, contextUID common.Conte
 	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-
+	_ = os.Remove(filePath + ".tmp")
 	return nil
+}
+
+func newConversationState() *conversationState {
+	return &conversationState{
+		Version:         conversationStateVersion,
+		Messages:        []*schema.AgenticMessage{},
+		PendingMessages: []*schema.AgenticMessage{},
+	}
+}
+
+func cloneConversationState(state *conversationState) *conversationState {
+	if state == nil {
+		return newConversationState()
+	}
+	return &conversationState{
+		Version:         conversationStateVersion,
+		Messages:        common.CloneAgenticMessages(state.Messages),
+		PendingMessages: common.CloneAgenticMessages(state.PendingMessages),
+	}
+}
+
+// stateLocked returns the cached or persisted state. The caller must hold m.mu.
+func (m *FileContextManager) stateLocked(contextUID common.ContextUID) (*conversationState, bool, error) {
+	if state, exists := m.cache[contextUID]; exists {
+		return state, true, nil
+	}
+
+	state, exists, err := m.loadState(contextUID)
+	if err != nil || !exists {
+		return state, exists, err
+	}
+	m.cache[contextUID] = state
+	return state, true, nil
 }
 
 // Helper methods
@@ -168,80 +304,89 @@ func (m *FileContextManager) getFilePath(contextUID common.ContextUID) string {
 	return currentPath
 }
 
-func (m *FileContextManager) persist(contextUID common.ContextUID, messages []*schema.AgenticMessage) error {
+// persistState writes committed history and the pending inbox together, so a
+// successful rename advances both atomically. Existing JSONL files are read by
+// loadState and migrated to this envelope on their next mutation.
+func (m *FileContextManager) persistState(contextUID common.ContextUID, state *conversationState) error {
 	filePath := m.getFilePath(contextUID)
 	tmpPath := filePath + ".tmp"
+
+	payload, err := sonic.Marshal(state)
+	if err != nil {
+		return err
+	}
 
 	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
-
-	writer := bufio.NewWriter(f)
-	for _, msg := range messages {
-		encoded, err := m.encodeMessage(msg)
-		if err != nil {
-			_ = f.Close()
-			return err
-		}
-		if _, err := writer.WriteString(encoded + "\n"); err != nil {
-			_ = f.Close()
-			return err
-		}
-	}
-
-	if err := writer.Flush(); err != nil {
+	if _, err := f.Write(append(payload, '\n')); err != nil {
 		_ = f.Close()
 		return err
 	}
-
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		return err
 	}
-
 	if err := f.Close(); err != nil {
 		return err
 	}
-
 	return os.Rename(tmpPath, filePath)
 }
 
-func (m *FileContextManager) load(contextUID common.ContextUID) ([]*schema.AgenticMessage, error) {
+func (m *FileContextManager) loadState(contextUID common.ContextUID) (*conversationState, bool, error) {
 	filePath := m.getFilePath(contextUID)
-
-	f, err := os.Open(filePath)
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return []*schema.AgenticMessage{}, nil
+			return newConversationState(), false, nil
 		}
-		return nil, err
+		return nil, false, err
 	}
-	defer f.Close()
 
-	var messages []*schema.AgenticMessage
-	reader := bufio.NewReader(f)
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return newConversationState(), true, nil
+	}
+
+	var state conversationState
+	if err := sonic.UnmarshalString(trimmed, &state); err == nil && state.Version == conversationStateVersion {
+		if state.Messages == nil {
+			state.Messages = []*schema.AgenticMessage{}
+		}
+		if state.PendingMessages == nil {
+			state.PendingMessages = []*schema.AgenticMessage{}
+		}
+		return &state, true, nil
+	}
+
+	// Backward compatibility: older conversations are one AgenticMessage per
+	// JSONL line. They are migrated to conversationState on the next write.
+	messages := make([]*schema.AgenticMessage, 0)
+	reader := bufio.NewReader(strings.NewReader(string(data)))
 	for {
-		line, err := reader.ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, err
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, false, readErr
 		}
-		line = strings.TrimSuffix(line, "\n")
-		line = strings.TrimSuffix(line, "\r")
+		line = strings.TrimSpace(line)
 		if line != "" {
-			msg, decodeErr := m.decodeMessage(line)
+			message, decodeErr := m.decodeMessage(line)
 			if decodeErr != nil {
-				logging.Errorf("Failed to decode message: %v", decodeErr)
-			} else {
-				messages = append(messages, msg)
+				return nil, false, decodeErr
 			}
+			messages = append(messages, message)
 		}
-		if errors.Is(err, io.EOF) {
+		if errors.Is(readErr, io.EOF) {
 			break
 		}
 	}
 
-	return messages, nil
+	return &conversationState{
+		Version:         conversationStateVersion,
+		Messages:        messages,
+		PendingMessages: []*schema.AgenticMessage{},
+	}, true, nil
 }
 
 type storedMessage struct {

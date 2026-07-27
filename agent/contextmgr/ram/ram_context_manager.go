@@ -15,6 +15,7 @@ import (
 type RAMContextManager struct {
 	mu       sync.RWMutex
 	messages map[common.ContextUID][]*schema.AgenticMessage
+	pending  map[common.ContextUID][]*schema.AgenticMessage
 }
 
 var _ contextmgr.ContextManager = (*RAMContextManager)(nil)
@@ -23,6 +24,7 @@ var _ contextmgr.ContextManager = (*RAMContextManager)(nil)
 func NewRAMContextManager() *RAMContextManager {
 	return &RAMContextManager{
 		messages: make(map[common.ContextUID][]*schema.AgenticMessage),
+		pending:  make(map[common.ContextUID][]*schema.AgenticMessage),
 	}
 }
 
@@ -72,7 +74,73 @@ func (m *RAMContextManager) Reset(_ context.Context, contextUID common.ContextUI
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.messages[contextUID] = messages
+	m.messages[contextUID] = common.CloneAgenticMessages(messages)
+}
+
+func (m *RAMContextManager) EnqueuePendingMessages(
+	_ context.Context,
+	contextUID common.ContextUID,
+	messages []*schema.AgenticMessage,
+) error {
+	if err := contextmgr.ValidatePendingMessages(messages); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	history, exists := m.messages[contextUID]
+	if !exists {
+		return contextmgr.ErrContextNotFound
+	}
+	if len(history) > 0 && contextmgr.IsFinalAnswerMessage(history[len(history)-1]) {
+		return contextmgr.ErrConversationFinalized
+	}
+	m.pending[contextUID] = append(m.pending[contextUID], common.CloneAgenticMessages(messages)...)
+	return nil
+}
+
+func (m *RAMContextManager) CommitTurn(
+	_ context.Context,
+	contextUID common.ContextUID,
+	turnMessages []*schema.AgenticMessage,
+) (*contextmgr.TurnCommitResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.messages[contextUID]; !exists {
+		return nil, contextmgr.ErrContextNotFound
+	}
+
+	applied := common.CloneAgenticMessages(m.pending[contextUID])
+	m.messages[contextUID] = append(m.messages[contextUID], common.CloneAgenticMessages(turnMessages)...)
+	m.messages[contextUID] = append(m.messages[contextUID], applied...)
+	delete(m.pending, contextUID)
+
+	return &contextmgr.TurnCommitResult{AppliedPendingMessages: applied}, nil
+}
+
+func (m *RAMContextManager) CommitFinal(
+	_ context.Context,
+	contextUID common.ContextUID,
+	message *schema.AgenticMessage,
+) error {
+	if err := contextmgr.ValidateFinalMessage(message); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.messages[contextUID]; !exists {
+		return contextmgr.ErrContextNotFound
+	}
+	m.messages[contextUID] = append(
+		m.messages[contextUID],
+		common.CloneAgenticMessages([]*schema.AgenticMessage{message})[0],
+	)
+	delete(m.pending, contextUID)
+	return nil
 }
 
 func (m *RAMContextManager) Delete(_ context.Context, contextUID common.ContextUID) error {
@@ -80,5 +148,6 @@ func (m *RAMContextManager) Delete(_ context.Context, contextUID common.ContextU
 	defer m.mu.Unlock()
 
 	delete(m.messages, contextUID)
+	delete(m.pending, contextUID)
 	return nil
 }

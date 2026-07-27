@@ -9,7 +9,7 @@ The current agent implementation lives in `originagent`. The model decides wheth
 - Native function calling with support for multiple tool calls in one model response.
 - Compatibility with OpenAI, Claude, Gemini, and any other model that implements Eino's `model.AgenticModel`.
 - File, in-memory, SQLite, and MySQL conversation context manager backends.
-- Conversation continuation through `ContextUID`.
+- Conversation continuation and persistent, protocol-safe steering through `ContextUID`.
 - Precise, aggressive, and selective-discard context compression strategies.
 - Task plan creation and updates, plus parallel execution of multiple tools.
 - Skill loading from a `skills/` directory.
@@ -129,6 +129,24 @@ func main() {
 
 `Do` stores the current user message, starts the agent loop in the background, and immediately returns the run's `ContextUID` and `Step` stream. Every call to `Do` has an independent stream, so callers do not need to poll the context manager to infer run boundaries. The stream closes when the agent finishes normally, is interrupted, the context is canceled, or background execution fails. Tool steps enter the stream after execution and callbacks complete; the final-answer step enters the stream after it has been persisted. `Step.ModelUsage` records SDK model calls, `Step.CallbackUsage` can record usage produced by callbacks, and `Step.Usage` is their total.
 
+## Steering a running conversation
+
+`Steer` queues one or more independent user messages in the conversation's context-manager-backed inbox:
+
+```go
+err = agent.Steer(ctx, &common.AgentSteerArgs{
+	ContextUID: contextUID,
+	UserInputs: []common.AgentUserInput{
+		{Text: "Do not deploy yet."},
+		{Text: "Run the complete test suite first."},
+	},
+})
+```
+
+The current assistant turn is allowed to settle. If it contains tool calls, all corresponding tool results are committed before the queued messages. At that protocol-safe boundary, the context manager atomically appends the completed tool turn followed by the queued user messages, and the next `Think` sees them.
+
+A final answer always wins: it is streamed and committed immediately, while any messages still pending at that boundary are discarded. Once a final assistant message is committed, `Steer` returns `contextmgr.ErrConversationFinalized`. Calling `Do` again appends a new user message and reopens steering for that run. Because final generation and `Steer` can race, a `Steer` accepted just before final commit may still be discarded. Concurrent `Do` calls for the same `ContextUID` remain unsupported.
+
 ## Registering custom tools
 
 Use `common.NewDefaultTool` to define a tool quickly. Parameters must be a JSON Schema object; `common.NewToolParameters` is the recommended constructor.
@@ -220,6 +238,10 @@ Available strategies:
 Every backend implements `contextmgr.ContextManager`:
 
 ```go
+type TurnCommitResult struct {
+	AppliedPendingMessages []*schema.AgenticMessage
+}
+
 type ContextManager interface {
 	InitNew(context.Context) common.ContextUID
 	NewContextUID(context.Context) common.ContextUID
@@ -227,9 +249,14 @@ type ContextManager interface {
 	GetAll(context.Context, common.ContextUID) []*schema.AgenticMessage
 	Len(context.Context, common.ContextUID) int
 	Reset(context.Context, common.ContextUID, []*schema.AgenticMessage)
+	EnqueuePendingMessages(context.Context, common.ContextUID, []*schema.AgenticMessage) error
+	CommitTurn(context.Context, common.ContextUID, []*schema.AgenticMessage) (*TurnCommitResult, error)
+	CommitFinal(context.Context, common.ContextUID, *schema.AgenticMessage) error
 	Delete(context.Context, common.ContextUID) error
 }
 ```
+
+`EnqueuePendingMessages` stores only user-role messages outside committed history. `CommitTurn` atomically appends a complete non-final turn and then moves all currently pending messages behind it, preserving order. `CommitFinal` atomically appends the final assistant answer and discards pending messages; further enqueue attempts return `ErrConversationFinalized` until a new user input is appended. `Reset` replaces committed history during compression but leaves the pending inbox untouched.
 
 ### Choosing a backend
 
@@ -264,7 +291,7 @@ _, secondRun, err := agent.Do(ctx, &common.AgentDoArgs{
 // Read secondRun until it returns streaming.ErrStreamClosed.
 ```
 
-When continuing a conversation, the SDK loads its history and updates the system prompt with the current run options. Because `Do` starts the agent loop asynchronously, drain the previous step stream until it closes before starting another run with the same `ContextUID`. This confirms that the previous run has finished or paused.
+When continuing a conversation, the SDK loads its history and updates the system prompt with the current run options. Appending the new `Do` user input reopens steering after the previous final answer. Because `Do` starts the agent loop asynchronously, drain the previous step stream until it closes before starting another run with the same `ContextUID`. This confirms that the previous run has finished or paused.
 
 ## Multimodal input
 

@@ -3,8 +3,19 @@ package originagent
 import (
 	"strings"
 
+	"github.com/torrischen/goat/agent/common"
+
 	"github.com/cloudwego/eino/schema"
 )
+
+func userInputMessage(input common.AgentUserInput) *schema.AgenticMessage {
+	parts := []*schema.ContentBlock{common.TextBlock(input.Text)}
+	parts = append(parts, input.Images...)
+	return &schema.AgenticMessage{
+		Role:          schema.AgenticRoleTypeUser,
+		ContentBlocks: parts,
+	}
+}
 
 func messageTokens(msg *schema.AgenticMessage) (int, int, int) {
 	if msg == nil || msg.ResponseMeta == nil || msg.ResponseMeta.TokenUsage == nil {

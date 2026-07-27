@@ -8,6 +8,14 @@ import (
 	"github.com/cloudwego/eino/components/model"
 )
 
+type AgentSteerArgs struct {
+	// ContextUID identifies the conversation whose pending inbox receives the
+	// messages.
+	ContextUID ContextUID
+	// UserInputs are queued as separate user messages in the supplied order.
+	UserInputs []AgentUserInput
+}
+
 type AgentDoArgs struct {
 	UserInput AgentUserInput
 	// ContextUID is the unique identifier for a conversation.
@@ -30,7 +38,7 @@ type AgentDoArgs struct {
 	// PlanUsageInstruction is the instruction to guide originagent on when to create a plan and how granular the plan should be.
 	// It is only used when EnablePlanning is true.
 	PlanUsageInstruction string
-	// FinalAnswerStreamingFunc is the function to stream the final answer, will be called when the agent finishes all steps
+	// FinalAnswerStreamingFunc receives streamed final-answer chunks.
 	FinalAnswerStreamingFunc FinalAnswerStreamFn
 	// FinalAnswerWebhook sends the settled final answer payload to the configured URL after the final step is stored
 	FinalAnswerWebhook *FinalAnswerWebhookConfig
@@ -101,4 +109,9 @@ type Agent interface {
 	// and returns the context UID and the step stream for this run. The stream is
 	// closed when the run finishes, is interrupted, or stops with an error.
 	Do(context.Context, *AgentDoArgs, ...model.Option) (ContextUID, streaming.Stream[*Step], error)
+
+	// Steer queues one or more user messages for a conversation. Messages are
+	// committed after the next complete non-final turn. A final answer discards
+	// pending messages, and steering a finalized conversation returns an error.
+	Steer(context.Context, *AgentSteerArgs) error
 }

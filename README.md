@@ -20,7 +20,8 @@
 
 - **Native tool calling** — execute one or more model-selected tools in an agent loop.
 - **Model agnostic** — use Eino adapters for OpenAI, Azure OpenAI, Claude, Gemini, or another compatible provider.
-- **Context management** — choose RAM, JSONL files, SQLite, or MySQL and resume a conversation by `ContextUID`.
+- **Context management** — choose RAM, local files, SQLite, or MySQL and resume a conversation by `ContextUID`.
+- **Live steering** — queue one or more user messages while an agent runs and apply them at the next protocol-safe turn boundary.
 - **Context compression** — compact long tool histories with precise, aggressive, or no-model discard strategies.
 - **Extensible tools** — register Go functions, MCP tools, Go shared libraries, or gRPC plugins.
 - **Planning and skills** — expose built-in planning tools and load skills on demand from a `skills/` directory.
@@ -148,6 +149,20 @@ func main() {
 
 `Agent.Do` stores the user message, starts the agent loop in the background, and immediately returns a `ContextUID` plus a stream for that run. Consume the stream until `streaming.ErrStreamClosed` before starting another turn with the same `ContextUID`.
 
+While the run is active, queue additional user messages with `Steer`:
+
+```go
+err = agent.Steer(ctx, &common.AgentSteerArgs{
+	ContextUID: contextUID,
+	UserInputs: []common.AgentUserInput{
+		{Text: "Do not deploy yet."},
+		{Text: "Run all tests first."},
+	},
+})
+```
+
+The messages are queued in the context manager and applied after the next complete tool turn. A final answer always wins and discards messages that are still pending at that boundary. After final commit, `Steer` returns `contextmgr.ErrConversationFinalized`; the next `Do` user input reopens steering.
+
 ### Add a custom tool
 
 Tools use JSON Schema parameters and return text or multimodal results:
@@ -206,7 +221,7 @@ Pass a `contextmgr.ContextManager` implementation to `originagent.NewAgent`. Pas
 | Backend | Constructor | Best suited for |
 | --- | --- | --- |
 | RAM | `ram.NewRAMContextManager()` | Tests and short-lived processes. |
-| Files | `file.NewFileContextManager("")` | Simple local JSONL persistence. |
+| Files | `file.NewFileContextManager("")` | Simple local atomic-file persistence with legacy JSONL migration. |
 | SQLite | `sqlite.NewSQLiteContextManager("")` | Durable single-node applications. |
 | MySQL | `mysql.NewMysqlContextManager(...)` | Shared, multi-process deployments. |
 

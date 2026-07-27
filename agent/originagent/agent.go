@@ -326,15 +326,35 @@ func appendConversationMessage(
 	return manager.Append(ctx, contextUID, message)
 }
 
-func commitConversationMessages(
+func commitConversationTurn(
 	ctx context.Context,
 	manager contextmgr.ContextManager,
 	contextUID common.ContextUID,
 	messages *[]*schema.AgenticMessage,
-	newMessages ...*schema.AgenticMessage,
-) {
-	*messages = append(*messages, newMessages...)
-	manager.Reset(ctx, contextUID, *messages)
+	turnMessages ...*schema.AgenticMessage,
+) ([]*schema.AgenticMessage, error) {
+	result, err := manager.CommitTurn(ctx, contextUID, turnMessages)
+	if err != nil {
+		return nil, err
+	}
+
+	*messages = append(*messages, turnMessages...)
+	*messages = append(*messages, result.AppliedPendingMessages...)
+	return result.AppliedPendingMessages, nil
+}
+
+func commitConversationFinal(
+	ctx context.Context,
+	manager contextmgr.ContextManager,
+	contextUID common.ContextUID,
+	messages *[]*schema.AgenticMessage,
+	message *schema.AgenticMessage,
+) error {
+	if err := manager.CommitFinal(ctx, contextUID, message); err != nil {
+		return err
+	}
+	*messages = append(*messages, message)
+	return nil
 }
 
 func optimizationAdviceMessages(steps ...*common.Step) []*schema.AgenticMessage {
@@ -418,6 +438,33 @@ func cloneAgentDoArgs(args *common.AgentDoArgs) *common.AgentDoArgs {
 	return &clone
 }
 
+// Steer queues user messages in the conversation's context-manager-backed
+// pending inbox. They are applied after the next complete non-final turn. A
+// final answer discards pending messages and closes the inbox until the next Do
+// appends a new user input.
+func (a *Agent) Steer(ctx context.Context, args *common.AgentSteerArgs) error {
+	if args == nil {
+		return fmt.Errorf("agent steer args is nil")
+	}
+	if args.ContextUID == "" {
+		return fmt.Errorf("agent steer context UID is empty")
+	}
+	if len(args.UserInputs) == 0 {
+		return fmt.Errorf("agent steer user inputs are empty")
+	}
+
+	messages := make([]*schema.AgenticMessage, 0, len(args.UserInputs))
+	for _, input := range args.UserInputs {
+		input.Images = append([]*schema.ContentBlock(nil), input.Images...)
+		messages = append(messages, userInputMessage(input))
+	}
+
+	if err := a.contextManager.EnqueuePendingMessages(ctx, args.ContextUID, messages); err != nil {
+		return fmt.Errorf("enqueue steering messages: %w", err)
+	}
+	return nil
+}
+
 func (a *Agent) Do(
 	ctx context.Context,
 	args *common.AgentDoArgs,
@@ -491,16 +538,28 @@ func (a *Agent) Do(
 		}
 	}
 
-	// Add new user input
-	userParts := []*schema.ContentBlock{common.TextBlock(args.UserInput.Text)}
-	userParts = append(userParts, args.UserInput.Images...)
-
-	userMessage := &schema.AgenticMessage{
-		Role:          schema.AgenticRoleTypeUser,
-		ContentBlocks: userParts,
+	// Apply steering messages left by an interrupted or canceled run before
+	// storing this run's explicit user input.
+	appliedBeforeRun, err := commitConversationTurn(
+		ctx,
+		a.contextManager,
+		contextUID,
+		&messages,
+	)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to apply pending steering messages: %w", err)
+	}
+	if len(appliedBeforeRun) > 0 {
+		logging.Infof(
+			"Agent.Do: applied %d pending steering messages before conversation %s resumed",
+			len(appliedBeforeRun),
+			contextUID,
+		)
 	}
 
-	// Store user message
+	// Store this run's user input after any steering messages left by the
+	// previous run.
+	userMessage := userInputMessage(args.UserInput)
 	if err := appendConversationMessage(ctx, a.contextManager, contextUID, &messages, userMessage); err != nil {
 		return "", nil, fmt.Errorf("failed to store user message: %w", err)
 	}
@@ -523,7 +582,7 @@ func (a *Agent) Do(
 	}
 
 	runLoop := func() error {
-		writeFinalAndReturn := func() error {
+		writeFinal := func() error {
 			finalAnswer, promptTokens, completionTokens, cachedTokens := a.generateFinalAnswer(
 				actx,
 				messages,
@@ -554,13 +613,18 @@ func (a *Agent) Do(
 			finalAnswer = finalStep.Observation
 			finalMessage := common.AssistantTextMessage(finalAnswer)
 			finalMessage.ResponseMeta = responseMetaFromUsage(promptTokens, cachedTokens, completionTokens)
-			if err := appendConversationMessage(actx, a.contextManager, contextUID, &messages, finalMessage); err != nil {
-				logging.Errorf("Agent.Do: failed to store final answer: %v", err)
+			if err := commitConversationFinal(
+				actx,
+				a.contextManager,
+				contextUID,
+				&messages,
+				finalMessage,
+			); err != nil {
+				logging.Errorf("Agent.Do: failed to commit final answer: %v", err)
 				return err
 			}
 
 			stepsUsed++
-
 			if err := emitStep(finalStep); err != nil {
 				return fmt.Errorf("failed to stream final step: %w", err)
 			}
@@ -583,9 +647,10 @@ func (a *Agent) Do(
 			default:
 			}
 
-			// reach the max step, generate the final answer then return
+			// Reach the max step, generate the final answer, and discard any
+			// steering messages that were still pending at the final boundary.
 			if stepsUsed >= maxStep {
-				if err := writeFinalAndReturn(); err != nil {
+				if err := writeFinal(); err != nil {
 					return err
 				}
 				return nil
@@ -744,7 +809,23 @@ func (a *Agent) Do(
 				}
 
 				pendingMessages = append(pendingMessages, optimizationAdviceMessages(toolSteps...)...)
-				commitConversationMessages(ctx, a.contextManager, contextUID, &messages, pendingMessages...)
+				appliedSteering, err := commitConversationTurn(
+					actx,
+					a.contextManager,
+					contextUID,
+					&messages,
+					pendingMessages...,
+				)
+				if err != nil {
+					return fmt.Errorf("failed to commit tool turn: %w", err)
+				}
+				if len(appliedSteering) > 0 {
+					logging.Infof(
+						"Agent.Do: applied %d steering messages after tool turn in conversation %s",
+						len(appliedSteering),
+						contextUID,
+					)
+				}
 
 				// Count the whole assistant tool-call batch as a single quota step,
 				// even when the model requested multiple tool executions at once.
@@ -764,7 +845,7 @@ func (a *Agent) Do(
 				}
 
 				if stepsUsed >= maxStep {
-					if err := writeFinalAndReturn(); err != nil {
+					if err := writeFinal(); err != nil {
 						return err
 					}
 					return nil
@@ -811,13 +892,18 @@ func (a *Agent) Do(
 			if reasoningContent != "" {
 				finalMessage.ContentBlocks = append([]*schema.ContentBlock{common.ReasoningBlock(reasoningContent)}, finalMessage.ContentBlocks...)
 			}
-			if err := appendConversationMessage(ctx, a.contextManager, contextUID, &messages, finalMessage); err != nil {
-				logging.Errorf("Agent.Do: failed to store final message: %v", err)
+			if err := commitConversationFinal(
+				actx,
+				a.contextManager,
+				contextUID,
+				&messages,
+				finalMessage,
+			); err != nil {
+				logging.Errorf("Agent.Do: failed to commit final message: %v", err)
 				return err
 			}
 
 			stepsUsed++
-
 			if err := emitStep(newStep); err != nil {
 				return fmt.Errorf("failed to stream final step: %w", err)
 			}
