@@ -14,7 +14,7 @@
   </p>
 </div>
 
-`goat` combines an asynchronous agent runtime, persistent conversation context, extensible tools, Milvus retrieval, OpenAI-compatible embeddings, structured prompt building, and typed streams in one Go module. The agent layer is built on [CloudWeGo Eino](https://github.com/cloudwego/eino) and accepts any `model.AgenticModel` implementation.
+`goat` combines an asynchronous agent runtime, persistent conversation context, extensible tools, Milvus retrieval, multi-provider embeddings, structured prompt building, and typed streams in one Go module. The agent layer is built on [CloudWeGo Eino](https://github.com/cloudwego/eino) and accepts any `model.AgenticModel` implementation.
 
 ## Features
 
@@ -28,7 +28,7 @@
 - **Streaming execution** — consume typed tool and final-answer steps, token usage, callbacks, and final-answer webhooks.
 - **Multimodal input and output** — pass image URLs, Base64 data, or binary images through supported models and tools.
 - **Milvus retrieval** — use dense vector, BM25, or hybrid retrieval with filters, partitions, and JSON fields.
-- **Reusable primitives** — OpenAI-compatible embeddings, a fluent prompt builder, and concurrent generic streams.
+- **Reusable primitives** — multi-provider embeddings, a fluent prompt builder, and concurrent generic streams.
 
 ## Packages
 
@@ -39,7 +39,7 @@
 | [`agent/contextmgr`](agent/contextmgr) | Context manager interface plus RAM, file, SQLite, and MySQL backends. |
 | [`agent/tools`](agent/tools) | Planning, skills, terminal, and shell tools. |
 | [`agent/toolplugin`](agent/toolplugin) | Go shared-library and gRPC tool plugins. |
-| [`embedder/openai`](embedder/openai) | OpenAI-compatible embedding client. |
+| [`embedder`](embedder) | Embedding clients for OpenAI-compatible APIs, Gemini, Cohere, Voyage AI, and Ollama. |
 | [`retriever/milvus`](retriever/milvus) | Vector, BM25, and hybrid Milvus retrievers. |
 | [`prompt`](prompt) | Fluent Markdown prompt builder. |
 | [`streaming`](streaming) | Concurrent, type-safe generic streams. |
