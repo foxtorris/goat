@@ -3,6 +3,7 @@
   <p><strong>A modular Go toolkit for building tool-using AI agents and retrieval pipelines.</strong></p>
   <p>
     <a href="https://go.dev/"><img alt="Go 1.25.8+" src="https://img.shields.io/badge/Go-1.25.8%2B-00ADD8?logo=go&amp;logoColor=white"></a>
+    <a href="https://github.com/torrischen/goat/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/torrischen/goat/actions/workflows/ci.yml/badge.svg"></a>
     <a href="https://pkg.go.dev/github.com/torrischen/goat/agent/react"><img alt="Go Reference" src="https://pkg.go.dev/badge/github.com/torrischen/goat/agent/react.svg"></a>
     <a href="LICENSE"><img alt="BSD 3-Clause License" src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg"></a>
   </p>
@@ -288,7 +289,7 @@ When changing the gRPC plugin protocol, regenerate its Go bindings with:
 make proto
 ```
 
-Issues and pull requests are welcome. Please format Go changes with `gofmt` and include tests for new behavior.
+Issues and pull requests are welcome. Please format Go changes with `gofmt` and include tests for new behavior. See the [contribution guide](CONTRIBUTING.md), [security policy](SECURITY.md), [code of conduct](CODE_OF_CONDUCT.md), and [changelog](CHANGELOG.md) for project policies.
 
 ## License
 
