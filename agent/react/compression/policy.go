@@ -132,7 +132,7 @@ func isFinalAnswerMessage(message *schema.AgenticMessage) bool {
 	if isCompressionArtifactMessage(message) {
 		return false
 	}
-	// In originagent, intermediate assistant messages contain tool calls. An
+	// In react, intermediate assistant messages contain tool calls. An
 	// assistant message without a tool call is the answer returned to the user.
 	for _, block := range message.ContentBlocks {
 		if block != nil && block.FunctionToolCall != nil {

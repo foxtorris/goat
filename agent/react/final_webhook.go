@@ -1,4 +1,4 @@
-package originagent
+package react
 
 import (
 	"context"
@@ -19,7 +19,7 @@ func (a *Agent) buildFinalAnswerWebhookPayload(
 ) *common.FinalAnswerWebhookPayload {
 	return &common.FinalAnswerWebhookPayload{
 		Event:       "final_answer",
-		Agent:       "originagent",
+		Agent:       "react",
 		ContextUID:  contextUID,
 		UserInput:   args.UserInput.Text,
 		FinalAnswer: finalAnswer,
@@ -66,7 +66,7 @@ func (a *Agent) sendFinalAnswerWebhook(
 
 	resp, err := request.Post(url)
 	if err != nil {
-		logging.Errorf("originagent final answer webhook send error: %v", err)
+		logging.Errorf("react final answer webhook send error: %v", err)
 		return
 	}
 
@@ -75,6 +75,6 @@ func (a *Agent) sendFinalAnswerWebhook(
 		if len(respBody) > 4096 {
 			respBody = respBody[:4096]
 		}
-		logging.Errorf("originagent final answer webhook failed with status %d: %s", resp.StatusCode(), respBody)
+		logging.Errorf("react final answer webhook failed with status %d: %s", resp.StatusCode(), respBody)
 	}
 }

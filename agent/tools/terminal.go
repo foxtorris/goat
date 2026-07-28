@@ -25,7 +25,7 @@ const (
 	truncationBoundaryBytes = 256
 )
 
-// Terminal returns a Codex-style shell command tool adapted to OriginAgent's
+// Terminal returns a Codex-style shell command tool adapted to React's
 // common.Tool interface. Commands run synchronously; PTY sessions, sandbox
 // approvals, and interactive stdin are intentionally left to the host process.
 func Terminal() common.Tool {

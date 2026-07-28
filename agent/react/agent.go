@@ -1,4 +1,4 @@
-package originagent
+package react
 
 import (
 	"context"
@@ -59,7 +59,7 @@ type Agent struct {
 //	    // BaseURL is optional for OpenAI-compatible gateways.
 //	    // ByAzure can be set when using Azure OpenAI.
 //	})
-//	agent := originagent.NewAgent(llm, 128, nil)
+//	agent := react.NewAgent(llm, 128, nil)
 //
 // Claude:
 //
@@ -73,7 +73,7 @@ type Agent struct {
 //	    MaxTokens: 4096,
 //	    // ByBedrock or ByGoogleVertexAI can be set for hosted Claude.
 //	})
-//	agent := originagent.NewAgent(llm, 128, nil)
+//	agent := react.NewAgent(llm, 128, nil)
 //
 // Gemini on Vertex AI:
 //
@@ -114,7 +114,7 @@ type Agent struct {
 //	    Client: client,
 //	    Model:  "gemini-2.5-flash",
 //	})
-//	agent := originagent.NewAgent(llm, 128, nil)
+//	agent := react.NewAgent(llm, 128, nil)
 //
 // Gemini Developer API uses the same agenticgemini model with a genai client
 // configured by API key instead of BackendVertexAI.
@@ -306,7 +306,7 @@ func (a *Agent) buildSystemPrompt(planMode bool, specialRequirements []string, s
 	skills := append([]string(nil), a.skills...)
 	a.mu.RUnlock()
 
-	return renderOriginAgentSystemPrompt(
+	return renderReactSystemPrompt(
 		planMode,
 		skills,
 		specialRequirements,

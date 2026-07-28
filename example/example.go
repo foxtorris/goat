@@ -11,7 +11,7 @@ import (
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/contextmgr/sqlite"
-	"github.com/torrischen/goat/agent/originagent"
+	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/embedder/openai"
 	"github.com/torrischen/goat/retriever/milvus"
 	"github.com/torrischen/goat/retriever/milvus/hybrid"
@@ -111,7 +111,7 @@ func AzureOpenAITest() {
 	if err != nil {
 		panic(err)
 	}
-	agent := originagent.NewAgent(llm, 128, manager)
+	agent := react.NewAgent(llm, 128, manager)
 	contextUID, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "Say hello in one sentence."},
 		MaxStep:   4,
@@ -150,7 +150,7 @@ func OpenAIAgentInterruptTest() {
 	}
 
 	manager := ram.NewRAMContextManager()
-	agent := originagent.NewAgent(llm, 128, manager)
+	agent := react.NewAgent(llm, 128, manager)
 
 	const approvalToolName = "request_human_approval"
 	approvalTool := common.NewDefaultTool(

@@ -1,4 +1,4 @@
-package originagent
+package react
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"io"
 
 	"github.com/torrischen/goat/agent/common"
-	"github.com/torrischen/goat/agent/originagent/compression"
+	"github.com/torrischen/goat/agent/react/compression"
 	"github.com/torrischen/goat/util/logging"
 
 	"github.com/cloudwego/eino/components/model"

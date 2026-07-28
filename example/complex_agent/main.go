@@ -21,7 +21,7 @@ import (
 	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
-	"github.com/torrischen/goat/agent/originagent"
+	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/streaming"
 )
 
@@ -51,7 +51,7 @@ func main() {
 		log.Fatalf("create OpenAI model: %v", err)
 	}
 
-	agent := originagent.NewAgent(llm, 128, ram.NewRAMContextManager())
+	agent := react.NewAgent(llm, 128, ram.NewRAMContextManager())
 	agent.AddTools(ctx,
 		serviceMetricsTool(),
 		dependencyHealthTool(),

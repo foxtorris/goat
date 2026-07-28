@@ -1,4 +1,4 @@
-// Package compression provides originagent context-compression strategies.
+// Package compression provides context-compression strategies for the React agent.
 package compression
 
 import (
@@ -16,7 +16,7 @@ const (
 	defaultAggressiveRecentMessages = 4
 )
 
-// Compress applies the configured strategy to an originagent conversation.
+// Compress applies the configured strategy to a React agent conversation.
 // Model-based strategies use llm with tools disabled; discard_half does not use llm.
 func Compress(
 	ctx context.Context,

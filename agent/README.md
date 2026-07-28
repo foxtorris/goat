@@ -2,7 +2,7 @@
 
 `agent` is goat's Go agent SDK. Built on CloudWeGo Eino's `model.AgenticModel`, it provides native model tool calling, conversation context management, context compression, task planning, skills, MCP integration, tool plugins, multimodal input, and streaming result callbacks.
 
-The current agent implementation lives in `originagent`. The model decides whether and how to call tools; the SDK executes those tools, persists messages, manages context, and produces the final answer.
+The current agent implementation lives in `react`. The model decides whether and how to call tools; the SDK executes those tools, persists messages, manages context, and produces the final answer.
 
 ## Features
 
@@ -35,7 +35,7 @@ agent/
 │   ├── mysql/               # MySQL storage
 │   ├── ram/                 # In-process storage
 │   └── sqlite/              # SQLite storage; defaults to data/goat_context.sqlite
-├── originagent/             # Native function-calling agent implementation
+├── react/                   # Native function-calling agent implementation
 │   └── compression/         # Independent context-compression strategies
 │       ├── precise.go       # Structured checkpoint strategy
 │       ├── aggressive.go    # Text summarization strategy
@@ -49,7 +49,7 @@ agent/
 The project requires Go 1.25.8 or newer.
 
 ```bash
-go get github.com/torrischen/goat/agent/originagent
+go get github.com/torrischen/goat/agent/react
 go get github.com/torrischen/goat/agent/contextmgr/ram
 ```
 
@@ -76,7 +76,7 @@ import (
 	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
-	"github.com/torrischen/goat/agent/originagent"
+	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/streaming"
 )
 
@@ -91,7 +91,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	agent := originagent.NewAgent(llm, 128, ram.NewRAMContextManager())
+	agent := react.NewAgent(llm, 128, ram.NewRAMContextManager())
 
 	contextUID, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "Introduce the goat Agent SDK in three sentences."},
@@ -274,7 +274,7 @@ manager, err := sqlite.NewSQLiteContextManager("")
 manager, err := mysql.NewMysqlContextManager("127.0.0.1", 3306, "user", "password", "goat")
 ```
 
-`originagent.NewAgent(llm, modelMaxTokensK, nil)` uses `file.FileContextManager` by default.
+`react.NewAgent(llm, modelMaxTokensK, nil)` uses `file.FileContextManager` by default.
 
 ### Continuing a conversation
 
@@ -450,7 +450,7 @@ go test ./agent/...
 Run the primary submodule tests:
 
 ```bash
-go test ./agent/originagent/... ./agent/tools ./agent/contextmgr/sqlite ./agent/toolplugin
+go test ./agent/react/... ./agent/tools ./agent/contextmgr/sqlite ./agent/toolplugin
 ```
 
 ## Best practices

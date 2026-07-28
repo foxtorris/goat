@@ -44,7 +44,7 @@ func ValidatePendingMessages(messages []*schema.AgenticMessage) error {
 }
 
 // IsFinalAnswerMessage reports whether message is an assistant response without
-// client-side function calls. This mirrors originagent's final-answer boundary.
+// client-side function calls. This mirrors the React agent's final-answer boundary.
 func IsFinalAnswerMessage(message *schema.AgenticMessage) bool {
 	if message == nil || message.Role != schema.AgenticRoleTypeAssistant {
 		return false

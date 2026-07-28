@@ -1,4 +1,4 @@
-package originagent
+package react
 
 import (
 	"fmt"
@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestOriginAgentPromptTemplatesRemainFormattingCompatible(t *testing.T) {
+func TestReactPromptTemplatesRemainFormattingCompatible(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -17,15 +17,15 @@ func TestOriginAgentPromptTemplatesRemainFormattingCompatible(t *testing.T) {
 	}{
 		{
 			name:     "without planning",
-			template: OriginAgentSystemPromptTemplate,
+			template: ReactSystemPromptTemplate,
 			args:     []any{"code-review skill", "Use matching skills."},
-			want:     buildOriginAgentPrompt(false, "code-review skill", "Use matching skills.", ""),
+			want:     buildReactPrompt(false, "code-review skill", "Use matching skills.", ""),
 		},
 		{
 			name:     "with planning",
-			template: OriginAgentWithPlanSystemPromptTemplate,
+			template: ReactWithPlanSystemPromptTemplate,
 			args:     []any{"code-review skill", "Use matching skills.", "Plan complex changes."},
-			want:     buildOriginAgentPrompt(true, "code-review skill", "Use matching skills.", "Plan complex changes."),
+			want:     buildReactPrompt(true, "code-review skill", "Use matching skills.", "Plan complex changes."),
 		},
 	}
 
@@ -41,10 +41,10 @@ func TestOriginAgentPromptTemplatesRemainFormattingCompatible(t *testing.T) {
 	}
 }
 
-func TestRenderOriginAgentSystemPromptWithoutPlanning(t *testing.T) {
+func TestRenderReactSystemPromptWithoutPlanning(t *testing.T) {
 	t.Parallel()
 
-	got := renderOriginAgentSystemPrompt(
+	got := renderReactSystemPrompt(
 		false,
 		[]string{"  code-review skill  ", "test skill\n"},
 		[]string{"Return JSON.", " ", "Keep the answer concise."},
@@ -53,7 +53,7 @@ func TestRenderOriginAgentSystemPromptWithoutPlanning(t *testing.T) {
 	)
 
 	assertPromptContains(t, got,
-		"## Role\n"+originAgentRole,
+		"## Role\n"+reactRole,
 		"## Available Skills\ncode-review skill  \ntest skill",
 		"## Skill Usage Instructions\nPrefer the narrowest matching skill.",
 		"## Special Requirements\n- Return JSON.\n- Keep the answer concise.",
@@ -65,15 +65,15 @@ func TestRenderOriginAgentSystemPromptWithoutPlanning(t *testing.T) {
 	)
 }
 
-func TestRenderOriginAgentSystemPromptWithPlanningAndDefaults(t *testing.T) {
+func TestRenderReactSystemPromptWithPlanningAndDefaults(t *testing.T) {
 	t.Parallel()
 
-	got := renderOriginAgentSystemPrompt(true, nil, nil, " \n", "")
+	got := renderReactSystemPrompt(true, nil, nil, " \n", "")
 
 	assertPromptContains(t, got,
 		"## Available Skills\nNONE",
 		"## Skill Usage Instructions\nNONE",
-		"## Planning\n"+originAgentPlanningOverview,
+		"## Planning\n"+reactPlanningOverview,
 		"## Caller Plan Usage Instructions",
 		"the user's explicit request.\n\nNONE",
 		"## Mandatory Update Rule",

@@ -3,7 +3,7 @@
   <p><strong>A modular Go toolkit for building tool-using AI agents and retrieval pipelines.</strong></p>
   <p>
     <a href="https://go.dev/"><img alt="Go 1.25.8+" src="https://img.shields.io/badge/Go-1.25.8%2B-00ADD8?logo=go&amp;logoColor=white"></a>
-    <a href="https://pkg.go.dev/github.com/torrischen/goat/agent/originagent"><img alt="Go Reference" src="https://pkg.go.dev/badge/github.com/torrischen/goat/agent/originagent.svg"></a>
+    <a href="https://pkg.go.dev/github.com/torrischen/goat/agent/react"><img alt="Go Reference" src="https://pkg.go.dev/badge/github.com/torrischen/goat/agent/react.svg"></a>
     <a href="LICENSE"><img alt="BSD 3-Clause License" src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg"></a>
   </p>
   <p>
@@ -34,7 +34,7 @@
 
 | Package | Purpose |
 | --- | --- |
-| [`agent/originagent`](agent/originagent) | Asynchronous native function-calling agent runtime. |
+| [`agent/react`](agent/react) | Asynchronous native function-calling agent runtime. |
 | [`agent/common`](agent/common) | Agent, tool, step, callback, and multimodal contracts. |
 | [`agent/contextmgr`](agent/contextmgr) | Context manager interface plus RAM, file, SQLite, and MySQL backends. |
 | [`agent/tools`](agent/tools) | Planning, skills, terminal, and shell tools. |
@@ -68,7 +68,7 @@ flowchart LR
 Install only the packages your application needs:
 
 ```bash
-go get github.com/torrischen/goat/agent/originagent
+go get github.com/torrischen/goat/agent/react
 go get github.com/torrischen/goat/agent/contextmgr/ram
 go get github.com/cloudwego/eino-ext/components/model/agenticopenai
 ```
@@ -104,7 +104,7 @@ import (
 	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
-	"github.com/torrischen/goat/agent/originagent"
+	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/streaming"
 )
 
@@ -120,7 +120,7 @@ func main() {
 	}
 
 	// 128 means an approximately 128K-token model context window.
-	agent := originagent.NewAgent(llm, 128, ram.NewRAMContextManager())
+	agent := react.NewAgent(llm, 128, ram.NewRAMContextManager())
 
 	contextUID, steps, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{
@@ -216,7 +216,7 @@ Consume `planningSteps` in the same way as the quick-start stream; the run is co
 
 ## Conversation context management
 
-Pass a `contextmgr.ContextManager` implementation to `originagent.NewAgent`. Passing `nil` uses a `file.FileContextManager` rooted at `data/conversations`.
+Pass a `contextmgr.ContextManager` implementation to `react.NewAgent`. Passing `nil` uses a `file.FileContextManager` rooted at `data/conversations`.
 
 | Backend | Constructor | Best suited for |
 | --- | --- | --- |
@@ -248,7 +248,7 @@ Retrievers support scalar and JSON-path filters, custom JSON fields and indexes,
 
 ## Model providers
 
-`originagent.NewAgent` accepts Eino's `model.AgenticModel` interface. Provider authentication, endpoints, and provider-specific options stay in the selected Eino adapter:
+`react.NewAgent` accepts Eino's `model.AgenticModel` interface. Provider authentication, endpoints, and provider-specific options stay in the selected Eino adapter:
 
 - `agenticopenai` for OpenAI Responses and Azure OpenAI.
 - `agenticclaude` for Claude.

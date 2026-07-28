@@ -35,7 +35,7 @@ type AgentDoArgs struct {
 	Callbacks *Callbacks
 	// SkillUsageInstruction is the instruction to guide the agent on how to use skills
 	SkillUsageInstruction string
-	// PlanUsageInstruction is the instruction to guide originagent on when to create a plan and how granular the plan should be.
+	// PlanUsageInstruction guides the React agent on when to create a plan and how granular the plan should be.
 	// It is only used when EnablePlanning is true.
 	PlanUsageInstruction string
 	// FinalAnswerStreamingFunc receives streamed final-answer chunks.
