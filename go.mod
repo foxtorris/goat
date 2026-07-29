@@ -1,6 +1,6 @@
 module github.com/torrischen/goat
 
-go 1.25.8
+go 1.25.12
 
 require (
 	github.com/alitto/pond/v2 v2.6.0
