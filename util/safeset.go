@@ -27,13 +27,9 @@ func (ss *SafeSet[T]) Range(f func(T) bool) []T {
 
 	res := make([]T, 0)
 
-	for _, v := range res {
-		if f == nil {
+	for _, v := range ss.set {
+		if f == nil || f(v) {
 			res = append(res, v)
-		} else {
-			if f(v) {
-				res = append(res, v)
-			}
 		}
 	}
 

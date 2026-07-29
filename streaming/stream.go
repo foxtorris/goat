@@ -86,6 +86,9 @@ func (s *StreamImpl[T]) ReadWithContext(ctx context.Context) (T, error) {
 }
 
 func (s *StreamImpl[T]) Write(item T) error {
+	if s.closed.Load() {
+		return ErrStreamClosed
+	}
 	select {
 	case <-s.done:
 		return ErrStreamClosed
@@ -102,6 +105,9 @@ func (s *StreamImpl[T]) WriteWithTimeout(item T, timeout time.Duration) error {
 }
 
 func (s *StreamImpl[T]) WriteWithContext(ctx context.Context, item T) error {
+	if s.closed.Load() {
+		return ErrStreamClosed
+	}
 	select {
 	case <-s.done:
 		return ErrStreamClosed
@@ -129,6 +135,9 @@ func (s *StreamImpl[T]) Len() int {
 }
 
 func (s *StreamImpl[T]) TryWrite(item T) error {
+	if s.closed.Load() {
+		return ErrStreamClosed
+	}
 	select {
 	case <-s.done:
 		return ErrStreamClosed
