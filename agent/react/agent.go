@@ -31,7 +31,8 @@ var _ common.Agent = (*Agent)(nil)
 type Agent struct {
 	mu              *sync.RWMutex
 	contextManager  contextmgr.ContextManager
-	skills          []string
+	skillsEnabled   bool
+	skillExcludes   []string
 	llmClient       model.AgenticModel
 	tools           []common.Tool
 	toolsMap        map[string]common.Tool
@@ -184,52 +185,58 @@ func (a *Agent) AddTool(ctx context.Context, tool common.Tool) {
 	a.AddTools(ctx, tool)
 }
 
+// AddSkills enables skill discovery for subsequent runs. Skill headers are
+// loaded from AgentDoArgs.SkillsDir for each run, allowing different runs to
+// use different roots without mutating Agent-wide state.
 func (a *Agent) AddSkills(ctx context.Context, exclude ...string) {
-	if info, err := os.Stat(common.SkillDefaultFolder); err == nil && info.IsDir() {
-		entries, err := os.ReadDir(common.SkillDefaultFolder)
-		if err != nil {
-			logging.Errorf("ReactAgentV2 AddSkills: failed to read skill folder %s: %v", common.SkillDefaultFolder, err)
-			return
-		}
+	a.mu.Lock()
+	alreadyEnabled := a.skillsEnabled
+	a.skillsEnabled = true
+	a.skillExcludes = append([]string(nil), exclude...)
+	a.mu.Unlock()
 
-		skills := make([]string, 0)
-		for _, entry := range entries {
-			if entry.IsDir() && !slices.Contains(exclude, entry.Name()) {
-				byteContent, err := os.ReadFile(
-					filepath.Join(
-						common.SkillDefaultFolder,
-						entry.Name(),
-						common.SkillMainFile,
-					),
-				)
-				if err != nil {
-					logging.Errorf("ReactAgentV2 AddSkills: failed to read skill main file for skill %s: %v", entry.Name(), err)
-					continue
-				}
-
-				header, exist := common.ExtractSkillHeader(util.ByteToString(byteContent))
-				if !exist {
-					logging.Errorf("ReactAgentV2 AddSkills: failed to extract description for skill %s", entry.Name())
-					continue
-				}
-
-				skills = append(
-					skills,
-					header+"\n\n",
-				)
-			}
-		}
-
-		a.mu.Lock()
-		a.skills = append(a.skills, skills...)
-		a.mu.Unlock()
-
-		a.AddTools(
-			ctx,
-			tools.LoadSkills(),
-			tools.ReadSpecifiedFileInSkill(),
-		)
+	if alreadyEnabled {
+		return
 	}
+	a.AddTools(
+		ctx,
+		tools.LoadSkills(),
+		tools.ReadSpecifiedFileInSkill(),
+	)
+}
+
+func loadSkillHeaders(skillsDir string, exclude []string) []string {
+	info, err := os.Stat(skillsDir)
+	if err != nil || !info.IsDir() {
+		if err != nil && !os.IsNotExist(err) {
+			logging.Errorf("ReactAgent: failed to inspect skill folder %s: %v", skillsDir, err)
+		}
+		return nil
+	}
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		logging.Errorf("ReactAgent: failed to read skill folder %s: %v", skillsDir, err)
+		return nil
+	}
+
+	skills := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || slices.Contains(exclude, entry.Name()) {
+			continue
+		}
+		byteContent, err := os.ReadFile(filepath.Join(skillsDir, entry.Name(), common.SkillMainFile))
+		if err != nil {
+			logging.Errorf("ReactAgent: failed to read skill main file for skill %s: %v", entry.Name(), err)
+			continue
+		}
+		header, exists := common.ExtractSkillHeader(util.ByteToString(byteContent))
+		if !exists {
+			logging.Errorf("ReactAgent: failed to extract description for skill %s", entry.Name())
+			continue
+		}
+		skills = append(skills, header+"\n\n")
+	}
+	return skills
 }
 
 func (a *Agent) RegisterMCPTools(ctx context.Context, cli client.MCPClient) error {
@@ -301,11 +308,22 @@ func (a *Agent) LoadRPCPluginTools(ctx context.Context, address ...string) error
 	return nil
 }
 
-func (a *Agent) buildSystemPrompt(planMode bool, specialRequirements []string, skillUsageInstruction string, planUsageInstruction string) string {
+func (a *Agent) buildSystemPrompt(
+	planMode bool,
+	specialRequirements []string,
+	skillUsageInstruction string,
+	planUsageInstruction string,
+	actx *common.AgentContext,
+) string {
 	a.mu.RLock()
-	skills := append([]string(nil), a.skills...)
+	skillsEnabled := a.skillsEnabled
+	exclude := append([]string(nil), a.skillExcludes...)
 	a.mu.RUnlock()
 
+	var skills []string
+	if skillsEnabled {
+		skills = loadSkillHeaders(common.SkillsDirFromContext(actx), exclude)
+	}
 	return renderReactSystemPrompt(
 		planMode,
 		skills,
@@ -479,6 +497,11 @@ func (a *Agent) Do(
 	for k, v := range args.ContextMeta {
 		actx.SetMeta(k, v)
 	}
+	args.SkillsDir = strings.TrimSpace(args.SkillsDir)
+	if args.SkillsDir == "" {
+		args.SkillsDir = common.SkillDefaultFolder
+	}
+	actx.SetMeta(common.InternalToolSkillsDirMetaKey, args.SkillsDir)
 
 	if args.MaxStep <= 0 {
 		args.MaxStep = 8
@@ -493,6 +516,7 @@ func (a *Agent) Do(
 		args.SpecialRequirements,
 		args.SkillUsageInstruction,
 		args.PlanUsageInstruction,
+		actx,
 	)
 
 	// Initialize or restore conversation

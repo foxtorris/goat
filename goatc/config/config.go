@@ -16,6 +16,24 @@ import (
 // CurrentVersion is the YAML schema version understood by goatc.
 const CurrentVersion = "v1"
 
+// ToolProvider selects how a configured tool source is loaded.
+type ToolProvider string
+
+const (
+	ToolProviderGoPlugin ToolProvider = "go_plugin"
+	ToolProviderGRPC     ToolProvider = "grpc"
+	ToolProviderMCP      ToolProvider = "mcp"
+)
+
+// MCPTransport selects the transport used to connect to an MCP server.
+type MCPTransport string
+
+const (
+	MCPTransportStdio          MCPTransport = "stdio"
+	MCPTransportSSE            MCPTransport = "sse"
+	MCPTransportStreamableHTTP MCPTransport = "streamable_http"
+)
+
 // Config is the complete goatc build and runtime configuration.
 type Config struct {
 	Version string  `yaml:"version"`
@@ -35,6 +53,7 @@ type Agent struct {
 	EnablePlanning      bool     `yaml:"enable_planning,omitempty"`
 	ParallelTools       int      `yaml:"parallel_tools,omitempty"`
 	Compress            bool     `yaml:"compress,omitempty"`
+	SkillsDir           string   `yaml:"skills_dir,omitempty"`
 	SpecialRequirements []string `yaml:"special_requirements,omitempty"`
 }
 
@@ -53,10 +72,19 @@ type Context struct {
 	Path    string `yaml:"path,omitempty"`
 }
 
-// Tool describes one Go plugin build unit.
+// Tool describes one provider-backed tool source. A Go plugin entry contributes
+// one tool, while gRPC and MCP entries may discover tools from remote services.
 type Tool struct {
-	Name   string `yaml:"name,omitempty"`
-	Source string `yaml:"source"`
+	Provider  ToolProvider      `yaml:"provider,omitempty"`
+	Name      string            `yaml:"name,omitempty"`
+	Source    string            `yaml:"source,omitempty"`
+	Address   string            `yaml:"address,omitempty"`
+	Transport MCPTransport      `yaml:"transport,omitempty"`
+	Command   string            `yaml:"command,omitempty"`
+	Args      []string          `yaml:"args,omitempty"`
+	URL       string            `yaml:"url,omitempty"`
+	Env       map[string]string `yaml:"env,omitempty"`
+	Headers   map[string]string `yaml:"headers,omitempty"`
 }
 
 // Build configures the output artifact.
@@ -116,6 +144,7 @@ func (c *Config) setDefaults() {
 	if c.Agent.MaxSteps <= 0 {
 		c.Agent.MaxSteps = 8
 	}
+	c.Agent.SkillsDir = strings.TrimSpace(c.Agent.SkillsDir)
 	if c.Model.APIKeyEnv == "" {
 		switch strings.ToLower(c.Model.Provider) {
 		case "openai":
@@ -137,6 +166,25 @@ func (c *Config) setDefaults() {
 	}
 	if c.Build.GOARCH == "" {
 		c.Build.GOARCH = runtime.GOARCH
+	}
+	for i := range c.Tools {
+		tool := &c.Tools[i]
+		provider := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(string(tool.Provider))), "-", "_")
+		if provider == "" && tool.Source != "" {
+			provider = string(ToolProviderGoPlugin)
+		}
+		switch provider {
+		case "go", "plugin", "shared_library":
+			provider = string(ToolProviderGoPlugin)
+		}
+		tool.Provider = ToolProvider(provider)
+
+		transport := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(string(tool.Transport))), "-", "_")
+		switch transport {
+		case "http", "streamablehttp":
+			transport = string(MCPTransportStreamableHTTP)
+		}
+		tool.Transport = MCPTransport(transport)
 	}
 }
 
@@ -162,24 +210,54 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("model.max_output_tokens cannot be negative")
 	}
 	if len(c.Tools) == 0 {
-		return fmt.Errorf("at least one tool is required")
+		return fmt.Errorf("at least one tool provider is required")
 	}
-	seen := make(map[string]struct{}, len(c.Tools))
+
+	seenPluginNames := make(map[string]struct{}, len(c.Tools))
+	seenGRPCAddresses := make(map[string]struct{}, len(c.Tools))
+	hasGoPlugins := false
 	for i := range c.Tools {
 		tool := &c.Tools[i]
-		if tool.Source == "" {
-			return fmt.Errorf("tools[%d].source is required", i)
+		tool.Name = strings.TrimSpace(tool.Name)
+		switch tool.Provider {
+		case ToolProviderGoPlugin:
+			hasGoPlugins = true
+			tool.Source = strings.TrimSpace(tool.Source)
+			if tool.Source == "" {
+				return fmt.Errorf("tools[%d].source is required for provider %q", i, tool.Provider)
+			}
+			if tool.Name == "" {
+				tool.Name = filepath.Base(filepath.Clean(tool.Source))
+			}
+			if !validFileName(tool.Name) {
+				return fmt.Errorf("tools[%d].name %q is not a valid file name", i, tool.Name)
+			}
+			if _, ok := seenPluginNames[tool.Name]; ok {
+				return fmt.Errorf("duplicate Go plugin name %q", tool.Name)
+			}
+			seenPluginNames[tool.Name] = struct{}{}
+			if tool.Address != "" || tool.Transport != "" || tool.Command != "" || len(tool.Args) > 0 || tool.URL != "" || len(tool.Env) > 0 || len(tool.Headers) > 0 {
+				return fmt.Errorf("tools[%d] contains options that are not valid for provider %q", i, tool.Provider)
+			}
+		case ToolProviderGRPC:
+			tool.Address = strings.TrimSpace(tool.Address)
+			if tool.Address == "" {
+				return fmt.Errorf("tools[%d].address is required for provider %q", i, tool.Provider)
+			}
+			if _, ok := seenGRPCAddresses[tool.Address]; ok {
+				return fmt.Errorf("duplicate gRPC tool address %q", tool.Address)
+			}
+			seenGRPCAddresses[tool.Address] = struct{}{}
+			if tool.Source != "" || tool.Transport != "" || tool.Command != "" || len(tool.Args) > 0 || tool.URL != "" || len(tool.Env) > 0 || len(tool.Headers) > 0 {
+				return fmt.Errorf("tools[%d] contains options that are not valid for provider %q", i, tool.Provider)
+			}
+		case ToolProviderMCP:
+			if err := validateMCPTool(i, tool); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unsupported tools[%d].provider %q", i, tool.Provider)
 		}
-		if tool.Name == "" {
-			tool.Name = filepath.Base(filepath.Clean(tool.Source))
-		}
-		if !validFileName(tool.Name) {
-			return fmt.Errorf("tools[%d].name %q is not a valid file name", i, tool.Name)
-		}
-		if _, ok := seen[tool.Name]; ok {
-			return fmt.Errorf("duplicate tool name %q", tool.Name)
-		}
-		seen[tool.Name] = struct{}{}
 	}
 	if c.Agent.ParallelTools < 0 {
 		return fmt.Errorf("agent.parallel_tools cannot be negative")
@@ -189,13 +267,53 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("unsupported context.backend %q", c.Context.Backend)
 	}
-	switch runtime.GOOS {
-	case "darwin", "freebsd", "linux":
-	default:
-		return fmt.Errorf("Go plugins are not supported on %s", runtime.GOOS)
+	if hasGoPlugins {
+		switch runtime.GOOS {
+		case "darwin", "freebsd", "linux":
+		default:
+			return fmt.Errorf("Go plugins are not supported on %s", runtime.GOOS)
+		}
 	}
 	if c.Build.GOOS != runtime.GOOS || c.Build.GOARCH != runtime.GOARCH {
-		return fmt.Errorf("Go plugins must be built natively: target is %s/%s, host is %s/%s", c.Build.GOOS, c.Build.GOARCH, runtime.GOOS, runtime.GOARCH)
+		return fmt.Errorf("goatc builds must be native: target is %s/%s, host is %s/%s", c.Build.GOOS, c.Build.GOARCH, runtime.GOOS, runtime.GOARCH)
+	}
+	return nil
+}
+
+func validateMCPTool(index int, tool *Tool) error {
+	if tool.Source != "" || tool.Address != "" {
+		return fmt.Errorf("tools[%d] contains options that are not valid for provider %q", index, tool.Provider)
+	}
+	for key := range tool.Env {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("tools[%d].env contains an empty variable name", index)
+		}
+	}
+	for key := range tool.Headers {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("tools[%d].headers contains an empty header name", index)
+		}
+	}
+
+	switch tool.Transport {
+	case MCPTransportStdio:
+		tool.Command = strings.TrimSpace(tool.Command)
+		if tool.Command == "" {
+			return fmt.Errorf("tools[%d].command is required for MCP stdio", index)
+		}
+		if tool.URL != "" || len(tool.Headers) > 0 {
+			return fmt.Errorf("tools[%d] contains HTTP options for MCP stdio", index)
+		}
+	case MCPTransportSSE, MCPTransportStreamableHTTP:
+		tool.URL = strings.TrimSpace(tool.URL)
+		if tool.URL == "" {
+			return fmt.Errorf("tools[%d].url is required for MCP %s", index, tool.Transport)
+		}
+		if tool.Command != "" || len(tool.Args) > 0 || len(tool.Env) > 0 {
+			return fmt.Errorf("tools[%d] contains stdio options for MCP %s", index, tool.Transport)
+		}
+	default:
+		return fmt.Errorf("unsupported tools[%d].transport %q for provider %q", index, tool.Transport, tool.Provider)
 	}
 	return nil
 }

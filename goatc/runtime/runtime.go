@@ -42,15 +42,15 @@ func Run(ctx context.Context, assets fs.FS) error {
 		return err
 	}
 	agent := react.NewAgent(llm, cfg.Agent.ModelMaxTokensK, manager)
+	if cfg.Agent.SkillsDir != "" {
+		agent.AddSkills(ctx)
+	}
 
-	pluginDir, err := extractPlugins(assets)
+	resources, err := loadToolProviders(ctx, agent, cfg, assets)
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(pluginDir)
-	if err := agent.LoadSharedLibPluginTools(ctx, pluginDir); err != nil {
-		return fmt.Errorf("load plugins: %w", err)
-	}
+	defer closeResources(resources)
 
 	return tui.Run(ctx, agent, cfg)
 }

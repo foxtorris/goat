@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-31
+
+### Added
+
+- `goatc`, a YAML-driven Agent compiler that embeds local Go plugins in a Bubble Tea executable and supports provider-based loading of multiple gRPC tool services and MCP servers over stdio, SSE, or Streamable HTTP.
+- Tagged releases publish versioned `goatc` archives for Linux, macOS, Windows, and FreeBSD on `amd64` and `arm64`, plus SHA-256 checksums.
+
+### Changed
+
+- React Agent skill roots are configurable per `Do` call through `AgentDoArgs.SkillsDir` and propagated to skill tools and callbacks through `AgentContext` metadata.
+
 ## [0.1.0] - 2026-07-29
 
 ### Added
@@ -20,5 +31,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Contribution, security, code of conduct, and GitHub issue and pull request guidance.
 - Dependabot configuration for Go modules and GitHub Actions.
 
-[Unreleased]: https://github.com/torrischen/goat/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/torrischen/goat/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/torrischen/goat/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/torrischen/goat/releases/tag/v0.1.0

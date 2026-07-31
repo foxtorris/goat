@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,7 @@ func LoadSkills() common.Tool {
 			return common.NewDefaultToolResult("skills parameter is missing or invalid.")
 		}
 
+		skillsDir := common.SkillsDirFromContext(actx)
 		skillPaths := util.Map(
 			skillNames,
 			func(sn any) string {
@@ -58,16 +60,20 @@ func LoadSkills() common.Tool {
 					return ""
 				}
 
-				return filepath.Join(
-					common.SkillDefaultFolder,
-					strSkillName,
-				)
+				if strSkillName == "" || strSkillName == "." || strSkillName == ".." || filepath.Base(strSkillName) != strSkillName {
+					logging.Errorf("Rejected invalid skill name: %q", strSkillName)
+					return ""
+				}
+				return filepath.Join(skillsDir, strSkillName)
 			},
 		)
 
 		result := make([]string, 0)
 
 		for _, sp := range skillPaths {
+			if sp == "" {
+				continue
+			}
 			findResult, err := exec.Command(
 				"find",
 				sp,
@@ -117,9 +123,15 @@ func ReadSpecifiedFileInSkill() common.Tool {
 			return common.NewDefaultToolResult("path parameter is missing or invalid.")
 		}
 
+		resolvedPath, err := resolvePathInSkills(common.SkillsDirFromContext(actx), path)
+		if err != nil {
+			logging.Errorf("Rejected file outside skill folder: %v", err)
+			return common.NewDefaultToolResult("Failed to read file: " + err.Error())
+		}
+
 		result, err := exec.Command(
 			"cat",
-			filepath.Join(path),
+			resolvedPath,
 		).Output()
 		if err != nil {
 			logging.Errorf("Failed to read file in skill folder: %v", err)
@@ -143,4 +155,48 @@ Attention!!!! This tool can ONLY read the files mentioned in the loaded skills!!
 		),
 		F: f,
 	}
+}
+
+func resolvePathInSkills(skillsDir, path string) (string, error) {
+	root, err := filepath.Abs(skillsDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve skills directory: %w", err)
+	}
+
+	var candidate string
+	if filepath.IsAbs(path) {
+		candidate = filepath.Clean(path)
+	} else {
+		candidate, err = filepath.Abs(path)
+		if err != nil {
+			return "", fmt.Errorf("resolve skill file: %w", err)
+		}
+		if !pathWithin(root, candidate) {
+			candidate = filepath.Join(root, path)
+		}
+	}
+	if !pathWithin(root, candidate) {
+		return "", fmt.Errorf("path %q is outside skills directory %q", path, skillsDir)
+	}
+
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve skills directory: %w", err)
+	}
+	resolvedCandidate, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve skill file: %w", err)
+	}
+	if !pathWithin(resolvedRoot, resolvedCandidate) {
+		return "", fmt.Errorf("path %q resolves outside skills directory %q", path, skillsDir)
+	}
+	return resolvedCandidate, nil
+}
+
+func pathWithin(root, candidate string) bool {
+	relative, err := filepath.Rel(root, candidate)
+	if err != nil {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }

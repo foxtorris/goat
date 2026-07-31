@@ -187,7 +187,7 @@ func buildReactPrompt(planMode bool, availableSkills, skillUsageInstruction, pla
 		ListSection(
 			"How to Load Skills",
 			"Use the 'load_skills' tool to get the full image of the skills, including the content in SKILL.md and the tree of files in the specified skills folder.",
-			"Skill file paths look like 'skills/<skill_name>/a/b/ref.md'. Pass that path to the 'read_specified_file_in_skill' tool to read a file inside a skill.",
+			"The 'load_skills' tool lists file paths from the current run's skills directory. Pass one of those paths to the 'read_specified_file_in_skill' tool to read a file inside a skill.",
 		).
 		ListSection(
 			"When Using a Skill",

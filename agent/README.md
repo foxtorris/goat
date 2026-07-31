@@ -12,7 +12,7 @@ The current agent implementation lives in `react`. The model decides whether and
 - Conversation continuation and persistent, protocol-safe steering through `ContextUID`.
 - Precise, aggressive, and selective-discard context compression strategies.
 - Task plan creation and updates, plus parallel execution of multiple tools.
-- Skill loading from a `skills/` directory.
+- Per-run skill loading from a configurable directory, propagated to tools through `AgentContext` metadata.
 - MCP tools, Go shared-library plugins, and gRPC tool plugins.
 - Text, image URL, Base64 image, and binary image input.
 - A per-run step stream returned directly by `Do`, with token usage, execution callbacks, final-answer streaming, and final-answer webhooks.
@@ -213,6 +213,7 @@ The main fields in `common.AgentDoArgs` are:
 | `EnablePlanning` | Exposes the built-in plan creation and update tools to the model. |
 | `PlanUsageInstruction` | Tells the model when and how to create plans while planning is enabled. |
 | `ToolExecutionOptions` | Controls parallel tool execution and maximum concurrency while planning is enabled. |
+| `SkillsDir` | Skill root for this run. Empty uses `skills`; the resolved path is available through `AgentContext` metadata. |
 | `SkillUsageInstruction` | Tells the model when and how to use skills. |
 
 ### Context compression
@@ -334,7 +335,7 @@ When `MaxConcurrency` is not set, parallel mode defaults to a maximum concurrenc
 
 ## Skills
 
-Skills are loaded from `skills/` in the current working directory by default. Each skill is a subdirectory containing a `SKILL.md` file:
+Skills are loaded from `skills/` in the current working directory by default. The root can be changed independently for every `Do` call. Each skill is a subdirectory containing a `SKILL.md` file:
 
 ```text
 skills/
@@ -343,16 +344,30 @@ skills/
     └── references/
 ```
 
-`SKILL.md` must contain a header description enclosed by `---` delimiters. After creating the agent, load skills with:
+`SKILL.md` must contain a header description enclosed by `---` delimiters. Enable skill tools once after creating the agent, then select the directory on each run:
 
 ```go
 agent.AddSkills(ctx)
 
-// Exclude a specific skill directory.
+_, steps, err := agent.Do(ctx, &common.AgentDoArgs{
+	UserInput: common.AgentUserInput{Text: "Review this change."},
+	SkillsDir: "./project-skills",
+})
+```
+
+An empty `SkillsDir` uses `common.SkillDefaultFolder` (`skills`). `AddSkills` may still exclude specific skill names for all subsequent runs:
+
+```go
 agent.AddSkills(ctx, "experimental-skill")
 ```
 
-Loading skills registers the `load_skills` and `read_specified_file_in_skill` tools. The model can then read skill files on demand instead of placing all skill content in context up front.
+Skill headers are discovered from the selected directory while building that run's system prompt. The resolved directory is stored under `common.InternalToolSkillsDirMetaKey` in the run's `AgentContext`; `load_skills`, `read_specified_file_in_skill`, custom tools, and callbacks therefore use the same per-run root:
+
+```go
+skillsDir := common.SkillsDirFromContext(agentContext)
+```
+
+The model reads full skill files on demand instead of placing all skill content in context up front.
 
 ## MCP and tool plugins
 

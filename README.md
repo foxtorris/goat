@@ -16,11 +16,11 @@
   </p>
 </div>
 
-`goat` combines an agent compiler, an asynchronous runtime, persistent conversation context, extensible tools, Milvus retrieval, multi-provider embeddings, structured prompt building, and typed streams in one Go module. Its first-class [`goatc`](goatc) compiler turns YAML plus Go tool directories into a single distributable Agent executable with an interactive Bubble Tea UI. The agent layer is built on [CloudWeGo Eino](https://github.com/cloudwego/eino) and accepts any `model.AgenticModel` implementation.
+`goat` combines an agent compiler, an asynchronous runtime, persistent conversation context, extensible tools, Milvus retrieval, multi-provider embeddings, structured prompt building, and typed streams in one Go module. Its first-class [`goatc`](goatc) compiler turns YAML plus provider-backed tools—local Go plugins, gRPC services, and MCP servers—into a single distributable Agent executable with an interactive Bubble Tea UI. The agent layer is built on [CloudWeGo Eino](https://github.com/cloudwego/eino) and accepts any `model.AgenticModel` implementation.
 
 ## Features
 
-- **Agent compiler (`goatc`)** — compile Go tool directories into shared-library plugins, assemble an Agent from strict YAML, embed everything, and emit one interactive executable.
+- **Agent compiler (`goatc`)** — combine local Go plugins, multiple gRPC tools, and multiple MCP servers through one provider-based YAML schema, then emit one interactive executable.
 - **Built-in terminal UI** — stream final answers, inspect tool execution in real time, continue conversations, steer active runs, cancel work, and monitor token usage.
 - **Native tool calling** — execute one or more model-selected tools in an agent loop.
 - **Model agnostic** — use Eino adapters for OpenAI, Azure OpenAI, Claude, Gemini, or another compatible provider.
@@ -39,26 +39,26 @@
 `goatc` is the shortest path from Go tools to a runnable Agent. Instead of writing model initialization, plugin loading, context management, streaming, and terminal UI glue by hand, describe the Agent in YAML and compile it:
 
 ```text
-Go tool directories + goatc.yaml
-              │
-              ▼
-            goatc
-              │
-              ├── builds each tool directory as a native .so plugin
-              ├── generates the configured Agent runtime
-              ├── embeds the normalized YAML and plugins
-              └── builds the Bubble Tea application
-              │
-              ▼
-     one distributable executable
+Local Go tools + gRPC services + MCP servers + goatc.yaml
+                         │
+                         ▼
+                       goatc
+                         │
+                         ├── builds local tools as native .so plugins
+                         ├── configures remote tool providers
+                         ├── embeds normalized YAML and local plugins
+                         └── builds the Bubble Tea application
+                         │
+                         ▼
+                one distributable executable
 ```
 
 ### What the generated executable includes
 
 - OpenAI, Claude/Anthropic, or Gemini model initialization driven by environment-based credentials.
-- All configured Go tools, compiled and embedded as shared-library plugins.
+- Provider-based tools: compiled and embedded Go plugins, multiple goat gRPC tool services, and MCP servers over stdio, SSE, or Streamable HTTP.
 - RAM, file, or SQLite conversation persistence.
-- Planning, parallel tool execution, context compression, and special requirements.
+- Planning, parallel tool execution, context compression, per-run skill directories, and special requirements.
 - A Bubble Tea interface with streamed answers, live tool status and results, multi-turn history, active-run steering, cancellation, and token accounting.
 
 A minimal project looks like this:
@@ -82,6 +82,7 @@ agent:
   enable_planning: true
   parallel_tools: 3
   compress: true
+  skills_dir: ./skills
 
 model:
   provider: openai
@@ -93,10 +94,31 @@ context:
   path: data/conversations
 
 tools:
+  # Omit provider for a backward-compatible local Go plugin.
   - name: search
     source: ./tools/search
-  - name: workspace
+  - provider: go_plugin
+    name: workspace
     source: ./tools/workspace
+
+  # Add as many goat gRPC tool services as needed.
+  - provider: grpc
+    name: translator
+    address: 127.0.0.1:50051
+  - provider: grpc
+    address: 127.0.0.1:50052
+
+  # Each MCP server can expose multiple tools.
+  - provider: mcp
+    name: filesystem
+    transport: stdio
+    command: npx
+    args: [-y, "@modelcontextprotocol/server-filesystem", /workspace]
+  - provider: mcp
+    transport: streamable_http
+    url: https://mcp.example.com/mcp
+    headers:
+      Authorization: Bearer ${MCP_TOKEN}
 
 build:
   output: ./dist/research-agent
@@ -114,18 +136,21 @@ goatc validate -f goatc.yaml
 goatc build -f goatc.yaml
 
 export OPENAI_API_KEY="your-api-key"
+export MCP_TOKEN="your-mcp-token"
 ./dist/research-agent
 ```
 
-Each configured source directory is one plugin build unit and follows the existing `New() toolplugin.ToolPlugin` contract. The Agent executable and its plugins are built together with the same Go toolchain and build tags. The output is one delivery artifact; at startup it extracts the embedded plugins to a temporary directory because Go's `plugin.Open` requires filesystem paths.
+The `tools[].provider` field is the common extension point. `go_plugin` compiles and embeds a local source directory, `grpc` imports a goat `PluginService` by address, and `mcp` initializes a stdio, SSE, or Streamable HTTP server and registers every tool it exposes. Add multiple entries of any provider type in one Agent. MCP values such as `${MCP_TOKEN}` are resolved from the runtime environment, so secrets do not need to be embedded in YAML.
 
-Go plugins are built natively and supported on Linux, macOS, and FreeBSD. See the complete [`goatc` guide](goatc/README.md) for the tool contract, every configuration field, keyboard controls, and build details.
+Each local source directory is one plugin build unit and follows the existing `New() toolplugin.ToolPlugin` contract. The Agent executable and its local plugins are built together with the same Go toolchain and build tags. The output is one delivery artifact; at startup it extracts embedded plugins to a temporary directory because Go's `plugin.Open` requires filesystem paths. Remote-only configurations build without embedded `.so` files. A configured `skills_dir` remains a runtime directory and is not embedded.
+
+Go plugins are built natively and supported on Linux, macOS, and FreeBSD. See the complete [`goatc` guide](goatc/README.md) for provider configuration, tool contracts, keyboard controls, and build details.
 
 ## Packages
 
 | Package | Purpose |
 | --- | --- |
-| [`goatc`](goatc) | YAML-driven Agent compiler, embedded-plugin runtime, and Bubble Tea interface. |
+| [`goatc`](goatc) | YAML-driven Agent compiler with Go plugin, gRPC, and MCP tool providers plus a Bubble Tea interface. |
 | [`agent/react`](agent/react) | Asynchronous native function-calling agent runtime. |
 | [`agent/common`](agent/common) | Agent, tool, step, callback, and multimodal contracts. |
 | [`agent/contextmgr`](agent/contextmgr) | Context manager interface plus RAM, file, SQLite, and MySQL backends. |
@@ -138,7 +163,7 @@ Go plugins are built natively and supported on Linux, macOS, and FreeBSD. See th
 
 ```mermaid
 flowchart LR
-    Source[YAML + Go tool directories] --> Goatc[goatc compiler]
+    Source[YAML + Go · gRPC · MCP providers] --> Goatc[goatc compiler]
     Goatc --> Binary[Agent executable]
     Binary --> TUI[Bubble Tea TUI]
     Binary --> Agent[Agent runtime]
@@ -162,11 +187,13 @@ flowchart LR
 
 ## Installation
 
-Install the Agent compiler:
+Install the Agent compiler from source:
 
 ```bash
 go install github.com/torrischen/goat/goatc@latest
 ```
+
+Prebuilt `goatc` archives for Linux, macOS, Windows, and FreeBSD (`amd64` and `arm64`) are attached to every [GitHub Release](https://github.com/torrischen/goat/releases), together with `SHA256SUMS`.
 
 When embedding goat as a library, install only the packages your application needs:
 

@@ -1,10 +1,69 @@
 # goatc
 
-`goatc` compiles Go tool plugins, embeds them with a YAML-configured goat agent, and produces one Bubble Tea executable. The executable extracts its embedded plugins to a temporary directory while it is running.
+`goatc` turns a strict YAML definition into one interactive goat Agent executable. Its provider-based tool configuration can combine locally compiled Go plugins, multiple gRPC tool-plugin services, and multiple MCP servers in the same Agent. Local `.so` files and the normalized configuration are embedded in the executable; remote providers are connected and their tools are registered at startup.
 
-## Tool contract
+## Tool providers
 
-Each tool source must build as a Go `main` package and export the constructor expected by `agent/toolplugin`:
+Every item under `tools` selects a provider:
+
+| Provider | Source | Result |
+| --- | --- | --- |
+| `go_plugin` | A Go directory or `.go` file | Compiled as a native `.so` and embedded. One entry represents one `ToolPlugin`. |
+| `grpc` | A goat gRPC tool-plugin address | Connects to one remote `PluginService`. Add multiple entries to import multiple gRPC tools. |
+| `mcp` | An MCP server over stdio, SSE, or Streamable HTTP | Initializes the server and imports every tool returned by `tools/list`. |
+
+For compatibility, an entry with `source` and no `provider` defaults to `go_plugin`.
+
+```yaml
+tools:
+  # Local Go plugins.
+  - provider: go_plugin
+    name: search
+    source: ./tools/search
+  - name: workspace # provider defaults to go_plugin
+    source: ./tools/workspace
+
+  # Multiple goat gRPC tool plugins.
+  - provider: grpc
+    name: translator
+    address: 127.0.0.1:50051
+  - provider: grpc
+    name: knowledge-search
+    address: 127.0.0.1:50052
+
+  # An MCP subprocess. All tools exposed by the server are registered.
+  - provider: mcp
+    name: filesystem
+    transport: stdio
+    command: npx
+    args:
+      - -y
+      - "@modelcontextprotocol/server-filesystem"
+      - /workspace
+    env:
+      MCP_LOG_LEVEL: info
+      MCP_TOKEN: ${MCP_TOKEN}
+
+  # A remote MCP server using Streamable HTTP.
+  - provider: mcp
+    name: remote-mcp
+    transport: streamable_http
+    url: https://mcp.example.com/mcp
+    headers:
+      Authorization: Bearer ${MCP_TOKEN}
+
+  # Legacy MCP SSE is also supported.
+  - provider: mcp
+    name: legacy-mcp
+    transport: sse
+    url: https://mcp.example.com/sse
+```
+
+`name` is optional for gRPC and MCP entries and is used in diagnostics; remote tool names are supplied by their servers. `${VAR}` references in MCP commands, arguments, URLs, environment values, and HTTP headers are expanded from the Agent process environment at startup. Avoid placing secrets directly in YAML because the normalized configuration is embedded in the output binary.
+
+## Local Go plugin contract
+
+Each `go_plugin` source must build as a Go `main` package and export the constructor expected by `agent/toolplugin`:
 
 ```go
 package main
@@ -33,7 +92,7 @@ func New() toolplugin.ToolPlugin { return &Tool{} }
 func main() {}
 ```
 
-A configured source directory produces one `.so`. Agent and plugin builds use the same local Go toolchain and build tags.
+A configured source directory produces one `.so`. Agent and plugin builds use the same local Go toolchain and build tags. See the [tool plugin cookbook](../agent/toolplugin/README.md) for the gRPC service contract.
 
 ## Configuration
 
@@ -47,6 +106,7 @@ agent:
   enable_planning: true
   parallel_tools: 3
   compress: true
+  skills_dir: ./skills
   special_requirements:
     - Keep answers concise.
 
@@ -62,10 +122,16 @@ context:
   path: data/conversations
 
 tools:
-  - name: search
+  - provider: go_plugin
+    name: search
     source: ./tools/search
-  - name: shell
-    source: ./tools/shell
+  - provider: grpc
+    address: 127.0.0.1:50051
+  - provider: mcp
+    name: filesystem
+    transport: stdio
+    command: npx
+    args: [-y, "@modelcontextprotocol/server-filesystem", /workspace]
 
 build:
   output: ./dist/ops-agent
@@ -75,7 +141,9 @@ tui:
   welcome: Ask me to investigate an issue.
 ```
 
-Paths are relative to the configuration file. Plugin builds are native-only because Go shared-library plugins cannot be reliably cross-compiled.
+Source and output paths are relative to the configuration file. A non-empty `agent.skills_dir` enables skill tools and is passed to every `Agent.Do` run through `AgentDoArgs.SkillsDir`; relative skill paths are resolved from the generated executable's working directory. Skill files are runtime inputs and are not embedded in the executable. Go plugin builds are native-only because Go shared-library plugins cannot be reliably cross-compiled. A configuration containing only gRPC and MCP providers does not build or embed any `.so` files.
+
+At startup, providers are loaded in this order: local Go plugins, gRPC services, then MCP servers. Startup fails if a configured remote provider cannot initialize or list its tools. MCP clients and stdio subprocesses are closed when the TUI exits.
 
 ## Commands
 
@@ -87,13 +155,41 @@ go run github.com/torrischen/goat/goatc build -f goatc.yaml
 # Override build.output:
 go run github.com/torrischen/goat/goatc build -f goatc.yaml -o ./dist/agent
 
-OPENAI_API_KEY=... ./dist/agent
+goatc version
+OPENAI_API_KEY=... MCP_TOKEN=... ./dist/agent
 ```
+
+## Release binaries
+
+Every `v*` tag publishes prebuilt `goatc` archives and a `SHA256SUMS` file on the corresponding [GitHub Release](https://github.com/torrischen/goat/releases):
+
+| OS | Architectures | Archive |
+| --- | --- | --- |
+| Linux | `amd64`, `arm64` | `.tar.gz` |
+| macOS | `amd64`, `arm64` | `.tar.gz` |
+| Windows | `amd64`, `arm64` | `.zip` |
+| FreeBSD | `amd64`, `arm64` | `.tar.gz` |
+
+Artifact names follow `goatc_<tag>_<os>_<arch>`. For example:
+
+```text
+goatc_v0.2.0_linux_amd64.tar.gz
+goatc_v0.2.0_windows_arm64.zip
+SHA256SUMS
+```
+
+Verify an individual downloaded archive from the release directory with:
+
+```bash
+grep 'goatc_v0.2.0_linux_amd64.tar.gz' SHA256SUMS | sha256sum --check
+```
+
+The Windows build can assemble Agents that use gRPC and MCP providers, but Go's native shared-library plugin mode is unavailable on Windows.
 
 During a run:
 
-- `Enter` submits a message. A message submitted while the agent is working is queued with `Agent.Steer`.
+- `Enter` submits a message. A message submitted while the Agent is working is queued with `Agent.Steer`.
 - `Esc` or `Ctrl+C` cancels the active run.
-- `Ctrl+C` exits when the agent is idle.
+- `Ctrl+C` exits when the Agent is idle.
 
-The resulting executable is a single delivery artifact, but loading an embedded Go plugin requires writing it to the operating system's temporary directory at runtime.
+The resulting executable is a single delivery artifact. When local Go plugins are configured, loading them requires writing the embedded `.so` files to the operating system's temporary directory at runtime.

@@ -13,11 +13,14 @@ import (
 	"github.com/torrischen/goat/goatc/config"
 )
 
+var version = "dev"
+
 const usage = `goatc assembles goat agents from YAML.
 
 Usage:
   goatc build [-f goatc.yaml] [-o output]
   goatc validate [-f goatc.yaml]
+  goatc version
 `
 
 func main() {
@@ -59,6 +62,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(stdout, "%s is valid\n", *configPath)
+		return nil
+	case "version", "-v", "--version":
+		fmt.Fprintf(stdout, "goatc %s\n", version)
 		return nil
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)

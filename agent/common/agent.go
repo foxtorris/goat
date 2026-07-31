@@ -33,7 +33,11 @@ type AgentDoArgs struct {
 	MaxStep int
 	// Callbacks contains the callbacks for the agent execution
 	Callbacks *Callbacks
-	// SkillUsageInstruction is the instruction to guide the agent on how to use skills
+	// SkillsDir is the root directory used to discover and read skills for this
+	// run. An empty value uses SkillDefaultFolder. The resolved value is exposed
+	// to tools and callbacks through AgentContext metadata.
+	SkillsDir string
+	// SkillUsageInstruction is the instruction to guide the agent on how to use skills.
 	SkillUsageInstruction string
 	// PlanUsageInstruction guides the React agent on when to create a plan and how granular the plan should be.
 	// It is only used when EnablePlanning is true.

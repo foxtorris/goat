@@ -212,6 +212,7 @@ func (m *model) startRun(runCtx context.Context, cancel context.CancelFunc, text
 			MaxStep:             m.config.Agent.MaxSteps,
 			EnablePlanning:      m.config.Agent.EnablePlanning,
 			Compress:            m.config.Agent.Compress,
+			SkillsDir:           m.config.Agent.SkillsDir,
 			SpecialRequirements: m.config.Agent.SpecialRequirements,
 			Callbacks: &common.Callbacks{
 				BeforeToolExecution: func(_ *common.AgentContext, step *common.Step) {

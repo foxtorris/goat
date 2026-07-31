@@ -8,6 +8,8 @@ import (
 
 func TestParseAppliesDefaults(t *testing.T) {
 	cfg, err := Parse([]byte(`
+agent:
+  skills_dir: " ./custom-skills "
 model:
   provider: openai
   name: gpt-5
@@ -25,6 +27,12 @@ tools:
 	}
 	if cfg.Model.APIKeyEnv != "OPENAI_API_KEY" {
 		t.Errorf("Model.APIKeyEnv = %q, want OPENAI_API_KEY", cfg.Model.APIKeyEnv)
+	}
+	if cfg.Agent.SkillsDir != "./custom-skills" {
+		t.Errorf("Agent.SkillsDir = %q, want ./custom-skills", cfg.Agent.SkillsDir)
+	}
+	if cfg.Tools[0].Provider != ToolProviderGoPlugin {
+		t.Errorf("Tools[0].Provider = %q, want %q", cfg.Tools[0].Provider, ToolProviderGoPlugin)
 	}
 	if cfg.Tools[0].Name != "echo" {
 		t.Errorf("Tools[0].Name = %q, want echo", cfg.Tools[0].Name)
@@ -59,8 +67,81 @@ tools:
   - name: echo
     source: ./two
 `))
-	if err == nil || !strings.Contains(err.Error(), `duplicate tool name "echo"`) {
+	if err == nil || !strings.Contains(err.Error(), `duplicate Go plugin name "echo"`) {
 		t.Fatalf("Parse() error = %v, want duplicate tool error", err)
+	}
+}
+
+func TestParseSupportsToolProviders(t *testing.T) {
+	cfg, err := Parse([]byte(`
+model: {provider: openai, name: gpt-5}
+tools:
+  - provider: grpc
+    name: translator
+    address: 127.0.0.1:50051
+  - provider: grpc
+    address: 127.0.0.1:50052
+  - provider: mcp
+    name: filesystem
+    transport: stdio
+    command: npx
+    args: [-y, "@modelcontextprotocol/server-filesystem", /tmp]
+    env:
+      MCP_TOKEN: ${MCP_TOKEN}
+  - provider: mcp
+    transport: streamable-http
+    url: https://example.com/mcp
+    headers:
+      Authorization: Bearer ${MCP_TOKEN}
+`))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got := cfg.Tools[0].Provider; got != ToolProviderGRPC {
+		t.Errorf("Tools[0].Provider = %q, want %q", got, ToolProviderGRPC)
+	}
+	if got := cfg.Tools[2].Transport; got != MCPTransportStdio {
+		t.Errorf("Tools[2].Transport = %q, want %q", got, MCPTransportStdio)
+	}
+	if got := cfg.Tools[3].Transport; got != MCPTransportStreamableHTTP {
+		t.Errorf("Tools[3].Transport = %q, want %q", got, MCPTransportStreamableHTTP)
+	}
+}
+
+func TestParseRejectsProviderOptionsFromAnotherProvider(t *testing.T) {
+	_, err := Parse([]byte(`
+model: {provider: openai, name: gpt-5}
+tools:
+  - provider: grpc
+    address: 127.0.0.1:50051
+    source: ./unexpected
+`))
+	if err == nil || !strings.Contains(err.Error(), "not valid for provider") {
+		t.Fatalf("Parse() error = %v, want provider option error", err)
+	}
+}
+
+func TestParseRejectsDuplicateGRPCAddress(t *testing.T) {
+	_, err := Parse([]byte(`
+model: {provider: openai, name: gpt-5}
+tools:
+  - {provider: grpc, address: "127.0.0.1:50051"}
+  - {provider: grpc, address: "127.0.0.1:50051"}
+`))
+	if err == nil || !strings.Contains(err.Error(), "duplicate gRPC tool address") {
+		t.Fatalf("Parse() error = %v, want duplicate gRPC address error", err)
+	}
+}
+
+func TestParseRejectsMissingMCPTransport(t *testing.T) {
+	_, err := Parse([]byte(`
+model: {provider: openai, name: gpt-5}
+tools:
+  - provider: mcp
+    url: https://example.com/mcp
+`))
+	if err == nil || !strings.Contains(err.Error(), "unsupported tools[0].transport") {
+		t.Fatalf("Parse() error = %v, want MCP transport error", err)
 	}
 }
 
