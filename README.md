@@ -1,6 +1,6 @@
 <div align="center">
   <h1>goat 🐐</h1>
-  <p><strong>A modular Go toolkit for building tool-using AI agents and retrieval pipelines.</strong></p>
+  <p><strong>Compile, ship, and extend tool-using AI agents in Go.</strong></p>
   <p>
     <a href="https://go.dev/"><img alt="Go 1.25.8+" src="https://img.shields.io/badge/Go-1.25.12%2B-00ADD8?logo=go&amp;logoColor=white"></a>
     <a href="https://github.com/torrischen/goat/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/torrischen/goat/actions/workflows/ci.yml/badge.svg"></a>
@@ -8,17 +8,20 @@
     <a href="LICENSE"><img alt="BSD 3-Clause License" src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg"></a>
   </p>
   <p>
+    <a href="#goatc-agent-compiler">goatc</a> ·
     <a href="#features">Features</a> ·
-    <a href="#quick-start">Quick start</a> ·
+    <a href="#sdk-quick-start">SDK quick start</a> ·
     <a href="#packages">Packages</a> ·
     <a href="#documentation">Documentation</a>
   </p>
 </div>
 
-`goat` combines an asynchronous agent runtime, persistent conversation context, extensible tools, Milvus retrieval, multi-provider embeddings, structured prompt building, and typed streams in one Go module. The agent layer is built on [CloudWeGo Eino](https://github.com/cloudwego/eino) and accepts any `model.AgenticModel` implementation.
+`goat` combines an agent compiler, an asynchronous runtime, persistent conversation context, extensible tools, Milvus retrieval, multi-provider embeddings, structured prompt building, and typed streams in one Go module. Its first-class [`goatc`](goatc) compiler turns YAML plus Go tool directories into a single distributable Agent executable with an interactive Bubble Tea UI. The agent layer is built on [CloudWeGo Eino](https://github.com/cloudwego/eino) and accepts any `model.AgenticModel` implementation.
 
 ## Features
 
+- **Agent compiler (`goatc`)** — compile Go tool directories into shared-library plugins, assemble an Agent from strict YAML, embed everything, and emit one interactive executable.
+- **Built-in terminal UI** — stream final answers, inspect tool execution in real time, continue conversations, steer active runs, cancel work, and monitor token usage.
 - **Native tool calling** — execute one or more model-selected tools in an agent loop.
 - **Model agnostic** — use Eino adapters for OpenAI, Azure OpenAI, Claude, Gemini, or another compatible provider.
 - **Context management** — choose RAM, local files, SQLite, or MySQL and resume a conversation by `ContextUID`.
@@ -31,10 +34,98 @@
 - **Milvus retrieval** — use dense vector, BM25, or hybrid retrieval with filters, partitions, and JSON fields.
 - **Reusable primitives** — multi-provider embeddings, a fluent prompt builder, and concurrent generic streams.
 
+## goatc agent compiler
+
+`goatc` is the shortest path from Go tools to a runnable Agent. Instead of writing model initialization, plugin loading, context management, streaming, and terminal UI glue by hand, describe the Agent in YAML and compile it:
+
+```text
+Go tool directories + goatc.yaml
+              │
+              ▼
+            goatc
+              │
+              ├── builds each tool directory as a native .so plugin
+              ├── generates the configured Agent runtime
+              ├── embeds the normalized YAML and plugins
+              └── builds the Bubble Tea application
+              │
+              ▼
+     one distributable executable
+```
+
+### What the generated executable includes
+
+- OpenAI, Claude/Anthropic, or Gemini model initialization driven by environment-based credentials.
+- All configured Go tools, compiled and embedded as shared-library plugins.
+- RAM, file, or SQLite conversation persistence.
+- Planning, parallel tool execution, context compression, and special requirements.
+- A Bubble Tea interface with streamed answers, live tool status and results, multi-turn history, active-run steering, cancellation, and token accounting.
+
+A minimal project looks like this:
+
+```text
+my-agent/
+├── go.mod
+├── goatc.yaml
+└── tools/
+    ├── search/          # package main; exports New() toolplugin.ToolPlugin
+    └── workspace/       # package main; exports New() toolplugin.ToolPlugin
+```
+
+```yaml
+version: v1
+
+agent:
+  name: research-agent
+  model_max_tokens_k: 128
+  max_steps: 12
+  enable_planning: true
+  parallel_tools: 3
+  compress: true
+
+model:
+  provider: openai
+  name: gpt-5
+  api_key_env: OPENAI_API_KEY
+
+context:
+  backend: file
+  path: data/conversations
+
+tools:
+  - name: search
+    source: ./tools/search
+  - name: workspace
+    source: ./tools/workspace
+
+build:
+  output: ./dist/research-agent
+
+tui:
+  welcome: Ask me to research, analyze, or modify the workspace.
+```
+
+Install, validate, build, and run:
+
+```bash
+go install github.com/torrischen/goat/goatc@latest
+
+goatc validate -f goatc.yaml
+goatc build -f goatc.yaml
+
+export OPENAI_API_KEY="your-api-key"
+./dist/research-agent
+```
+
+Each configured source directory is one plugin build unit and follows the existing `New() toolplugin.ToolPlugin` contract. The Agent executable and its plugins are built together with the same Go toolchain and build tags. The output is one delivery artifact; at startup it extracts the embedded plugins to a temporary directory because Go's `plugin.Open` requires filesystem paths.
+
+Go plugins are built natively and supported on Linux, macOS, and FreeBSD. See the complete [`goatc` guide](goatc/README.md) for the tool contract, every configuration field, keyboard controls, and build details.
+
 ## Packages
 
 | Package | Purpose |
 | --- | --- |
+| [`goatc`](goatc) | YAML-driven Agent compiler, embedded-plugin runtime, and Bubble Tea interface. |
 | [`agent/react`](agent/react) | Asynchronous native function-calling agent runtime. |
 | [`agent/common`](agent/common) | Agent, tool, step, callback, and multimodal contracts. |
 | [`agent/contextmgr`](agent/contextmgr) | Context manager interface plus RAM, file, SQLite, and MySQL backends. |
@@ -47,12 +138,16 @@
 
 ```mermaid
 flowchart LR
-    App[Application] --> Agent[Agent runtime]
+    Source[YAML + Go tool directories] --> Goatc[goatc compiler]
+    Goatc --> Binary[Agent executable]
+    Binary --> TUI[Bubble Tea TUI]
+    Binary --> Agent[Agent runtime]
+    SDK[Go SDK application] --> Agent
     Agent --> Model[Eino AgenticModel]
     Agent --> Tools[Go · MCP · gRPC · shared-library tools]
     Agent --> ContextManager[RAM · files · SQLite · MySQL]
     Agent --> Steps[Typed step stream]
-    App --> Retriever[Retriever]
+    SDK --> Retriever[Retriever]
     Retriever --> Milvus[(Milvus)]
     Retriever --> Embedder[Embedder]
 ```
@@ -63,10 +158,17 @@ flowchart LR
 - Credentials for the model or embedding provider you choose.
 - Milvus **2.6** only when using the retriever packages.
 - CGO and a C compiler when using the SQLite context manager.
+- Linux, macOS, or FreeBSD for `goatc` shared-library builds; Agent and plugins are built natively for the current OS and architecture.
 
 ## Installation
 
-Install only the packages your application needs:
+Install the Agent compiler:
+
+```bash
+go install github.com/torrischen/goat/goatc@latest
+```
+
+When embedding goat as a library, install only the packages your application needs:
 
 ```bash
 go get github.com/torrischen/goat/agent/react
@@ -82,7 +184,9 @@ go get github.com/torrischen/goat/prompt
 go get github.com/torrischen/goat/streaming
 ```
 
-## Quick start
+## SDK quick start
+
+Use this path when embedding goat directly into a Go application. For a YAML-driven, ready-to-run Agent executable, start with [`goatc`](#goatc-agent-compiler).
 
 Set an API key:
 
@@ -259,6 +363,7 @@ See the [Agent SDK guide](agent/README.md) for provider setup, MCP registration,
 
 ## Documentation
 
+- [goatc Agent compiler and TUI guide](goatc/README.md)
 - [Agent SDK guide](agent/README.md)
 - [Tool array and nested parameter schemas](agent/common/ARRAY_PARAMETERS.md)
 - [Tool plugin cookbook](agent/toolplugin/README.md)

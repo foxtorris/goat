@@ -1,0 +1,311 @@
+// Package tui provides the interactive terminal UI used by generated agents.
+package tui
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/goatc/config"
+	"github.com/torrischen/goat/streaming"
+)
+
+var (
+	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	userStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	agentStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
+	toolStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	mutedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	borderStyle = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
+)
+
+type model struct {
+	ctx        context.Context
+	agent      common.Agent
+	config     *config.Config
+	events     chan tea.Msg
+	input      textinput.Model
+	viewport   viewport.Model
+	transcript strings.Builder
+	contextUID common.ContextUID
+	cancel     context.CancelFunc
+	running    bool
+	answerOpen bool
+	status     string
+	width      int
+	height     int
+}
+
+type runStartedMsg struct {
+	uid common.ContextUID
+}
+
+type answerChunkMsg string
+
+type toolStartedMsg struct {
+	name  string
+	input map[string]any
+}
+
+type toolFinishedMsg struct {
+	name   string
+	result string
+}
+
+type runFinishedMsg struct {
+	promptTokens     int
+	cachedTokens     int
+	completionTokens int
+}
+
+type runErrorMsg struct{ err error }
+type steerResultMsg struct{ err error }
+
+// Run starts the interactive terminal interface.
+func Run(ctx context.Context, agent common.Agent, cfg *config.Config) error {
+	input := textinput.New()
+	input.Placeholder = "Ask the agent..."
+	input.Prompt = "> "
+	input.CharLimit = 16 * 1024
+	input.Focus()
+
+	m := &model{
+		ctx:      ctx,
+		agent:    agent,
+		config:   cfg,
+		events:   make(chan tea.Msg, 256),
+		input:    input,
+		viewport: viewport.New(80, 20),
+		status:   "ready",
+	}
+	if cfg.TUI.Welcome != "" {
+		m.appendText(cfg.TUI.Welcome + "\n\n")
+	}
+	program := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
+	_, err := program.Run()
+	return err
+}
+
+func (m *model) Init() tea.Cmd {
+	return textinput.Blink
+}
+
+func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	var commands []tea.Cmd
+
+	switch msg := message.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.resize()
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c":
+			if m.running && m.cancel != nil {
+				m.cancel()
+				m.status = "cancelling"
+				return m, nil
+			}
+			return m, tea.Quit
+		case "esc":
+			if m.running && m.cancel != nil {
+				m.cancel()
+				m.status = "cancelling"
+			}
+			return m, nil
+		case "enter":
+			text := strings.TrimSpace(m.input.Value())
+			if text == "" {
+				return m, nil
+			}
+			m.input.SetValue("")
+			m.appendText(userStyle.Render("You") + "\n" + text + "\n\n")
+			if m.running {
+				if m.contextUID == "" {
+					m.appendText(mutedStyle.Render("Agent is starting; try again in a moment.") + "\n\n")
+					return m, nil
+				}
+				commands = append(commands, m.steer(text))
+			} else {
+				m.running = true
+				m.answerOpen = false
+				m.status = "thinking"
+				runCtx, cancel := context.WithCancel(m.ctx)
+				m.cancel = cancel
+				commands = append(commands, m.startRun(runCtx, cancel, text))
+			}
+			return m, tea.Batch(commands...)
+		}
+	case runStartedMsg:
+		m.contextUID = msg.uid
+		commands = append(commands, m.waitForEvent())
+	case answerChunkMsg:
+		if !m.answerOpen {
+			m.appendText(agentStyle.Render(m.config.Agent.Name) + "\n")
+			m.answerOpen = true
+		}
+		m.appendText(string(msg))
+		commands = append(commands, m.waitForEvent())
+	case toolStartedMsg:
+		m.closeAnswer()
+		m.appendText(toolStyle.Render(fmt.Sprintf("● %s", msg.name)) + " " + mutedStyle.Render(fmt.Sprint(msg.input)) + "\n")
+		m.status = "running " + msg.name
+		commands = append(commands, m.waitForEvent())
+	case toolFinishedMsg:
+		result := strings.TrimSpace(msg.result)
+		if result != "" {
+			m.appendText(mutedStyle.Render(abbreviate(result, 500)) + "\n")
+		}
+		m.status = "thinking"
+		commands = append(commands, m.waitForEvent())
+	case runFinishedMsg:
+		m.closeAnswer()
+		m.running = false
+		m.cancel = nil
+		m.status = fmt.Sprintf("ready · tokens %d/%d/%d", msg.promptTokens, msg.cachedTokens, msg.completionTokens)
+	case runErrorMsg:
+		m.closeAnswer()
+		m.running = false
+		m.cancel = nil
+		if errors.Is(msg.err, context.Canceled) {
+			m.status = "cancelled"
+		} else {
+			m.status = "error"
+			m.appendText(errorStyle.Render("Error: "+msg.err.Error()) + "\n\n")
+		}
+	case steerResultMsg:
+		if msg.err != nil {
+			m.appendText(errorStyle.Render("Could not steer: "+msg.err.Error()) + "\n\n")
+		} else {
+			m.appendText(mutedStyle.Render("Message queued for the next turn.") + "\n\n")
+		}
+	}
+
+	var command tea.Cmd
+	m.input, command = m.input.Update(message)
+	commands = append(commands, command)
+	m.viewport, command = m.viewport.Update(message)
+	commands = append(commands, command)
+	return m, tea.Batch(commands...)
+}
+
+func (m *model) View() string {
+	header := titleStyle.Render(m.config.Agent.Name) + "  " + mutedStyle.Render(m.config.Model.Provider+"/"+m.config.Model.Name)
+	status := mutedStyle.Render(m.status + " · Enter send · Esc cancel · Ctrl+C quit")
+	body := borderStyle.Width(max(1, m.width-2)).Height(max(1, m.viewport.Height)).Render(m.viewport.View())
+	return header + "\n" + body + "\n" + m.input.View() + "\n" + status
+}
+
+func (m *model) startRun(runCtx context.Context, cancel context.CancelFunc, text string) tea.Cmd {
+	return func() tea.Msg {
+		parallel := m.config.Agent.ParallelTools
+		args := &common.AgentDoArgs{
+			ContextUID:          m.contextUID,
+			UserInput:           common.AgentUserInput{Text: text},
+			MaxStep:             m.config.Agent.MaxSteps,
+			EnablePlanning:      m.config.Agent.EnablePlanning,
+			Compress:            m.config.Agent.Compress,
+			SpecialRequirements: m.config.Agent.SpecialRequirements,
+			Callbacks: &common.Callbacks{
+				BeforeToolExecution: func(_ *common.AgentContext, step *common.Step) {
+					if !step.IsFinalAnswer {
+						m.events <- toolStartedMsg{name: step.ToolName, input: step.ActionInputParam}
+					}
+				},
+				AfterToolExecution: func(_ *common.AgentContext, step *common.Step) {
+					if !step.IsFinalAnswer {
+						m.events <- toolFinishedMsg{name: step.ToolName, result: step.Observation}
+					}
+				},
+			},
+			FinalAnswerStreamingFunc: func(_ context.Context, chunk []byte) error {
+				m.events <- answerChunkMsg(string(chunk))
+				return nil
+			},
+		}
+		if parallel > 0 {
+			args.ToolExecutionOptions = &common.ToolExecutionOptions{EnableParallel: true, MaxConcurrency: parallel}
+		}
+		uid, steps, err := m.agent.Do(runCtx, args)
+		if err != nil {
+			cancel()
+			return runErrorMsg{err: err}
+		}
+		go func() {
+			defer cancel()
+			var prompt, cached, completion int
+			for {
+				step, readErr := steps.ReadWithContext(runCtx)
+				if errors.Is(readErr, streaming.ErrStreamClosed) {
+					if err := runCtx.Err(); err != nil {
+						m.events <- runErrorMsg{err: err}
+					} else {
+						m.events <- runFinishedMsg{promptTokens: prompt, cachedTokens: cached, completionTokens: completion}
+					}
+					return
+				}
+				if readErr != nil {
+					m.events <- runErrorMsg{err: readErr}
+					return
+				}
+				if step.Usage != nil {
+					prompt += step.Usage.PromptTokens
+					cached += step.Usage.CachedTokens
+					completion += step.Usage.CompletionTokens
+				}
+			}
+		}()
+		return runStartedMsg{uid: uid}
+	}
+}
+
+func (m *model) steer(text string) tea.Cmd {
+	uid := m.contextUID
+	return func() tea.Msg {
+		err := m.agent.Steer(m.ctx, &common.AgentSteerArgs{
+			ContextUID: uid,
+			UserInputs: []common.AgentUserInput{{Text: text}},
+		})
+		return steerResultMsg{err: err}
+	}
+}
+
+func (m *model) waitForEvent() tea.Cmd {
+	return func() tea.Msg { return <-m.events }
+}
+
+func (m *model) appendText(text string) {
+	m.transcript.WriteString(text)
+	m.viewport.SetContent(m.transcript.String())
+	m.viewport.GotoBottom()
+}
+
+func (m *model) closeAnswer() {
+	if m.answerOpen {
+		m.appendText("\n\n")
+		m.answerOpen = false
+	}
+}
+
+func (m *model) resize() {
+	m.viewport.Width = max(1, m.width-4)
+	m.viewport.Height = max(3, m.height-7)
+	m.input.Width = max(1, m.width-2)
+	m.viewport.SetContent(m.transcript.String())
+	m.viewport.GotoBottom()
+}
+
+func abbreviate(value string, limit int) string {
+	value = strings.ReplaceAll(value, "\n", " ")
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "…"
+}
