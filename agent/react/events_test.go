@@ -131,10 +131,10 @@ func TestDoStreamsParallelToolCompletionOrderAndKeepsResultOrder(t *testing.T) {
 	agent.AddTools(ctx,
 		common.NewDefaultTool("slow", "slow tool", common.NewToolParameters(), func(*common.AgentContext, map[string]any) common.ToolResult {
 			<-releaseSlow
-			return common.NewDefaultToolResult("slow result")
+			return common.NewDefaultToolResult("slow result").AddUsage(common.NewAgentUsage(2, 0, 1))
 		}),
 		common.NewDefaultTool("fast", "fast tool", common.NewToolParameters(), func(*common.AgentContext, map[string]any) common.ToolResult {
-			return common.NewDefaultToolResult("fast result")
+			return common.NewDefaultToolResult("fast result").AddUsage(common.NewAgentUsage(3, 1, 2))
 		}),
 	)
 
@@ -192,7 +192,7 @@ func TestDoStreamsParallelToolCompletionOrderAndKeepsResultOrder(t *testing.T) {
 
 	terminal := eventsByType[common.RunCompletedEvent](events)
 	if len(terminal) != 1 || terminal[0].ToolCalls != 2 || !reflect.DeepEqual(terminal[0].Usage, &common.AgentUsage{
-		PromptTokens: 9, CachedTokens: 1, CompletionTokens: 3,
+		PromptTokens: 14, CachedTokens: 2, CompletionTokens: 6,
 	}) {
 		t.Fatalf("run completed events = %+v", terminal)
 	}

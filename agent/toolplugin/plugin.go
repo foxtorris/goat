@@ -245,6 +245,10 @@ func (r *rpcToolResult) ImageParts() []*schema.ContentBlock {
 	return r.imageParts
 }
 
+func (r *rpcToolResult) Usage() *common.AgentUsage {
+	return nil
+}
+
 func (r *rpcToolResult) String() string {
 	if r == nil {
 		return ""

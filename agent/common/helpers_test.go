@@ -131,11 +131,25 @@ func TestNamesSkillsAndResults(t *testing.T) {
 		t.Fatal("ContextUID.String returned the wrong value")
 	}
 	result := NewDefaultToolResult("text")
-	if result.String() != "text" || result.ImageParts() != nil {
+	if result.String() != "text" || result.ImageParts() != nil || result.Usage() != nil {
 		t.Fatalf("default result = %+v", result)
 	}
+	firstUsage := NewAgentUsage(1, 2, 3)
+	if got := result.AddUsage(firstUsage).AddUsage(NewAgentUsage(4, 5, 6)).Usage(); !reflect.DeepEqual(got, &AgentUsage{
+		PromptTokens: 5, CachedTokens: 7, CompletionTokens: 9,
+	}) {
+		t.Fatalf("default result usage = %+v", got)
+	}
+	if !reflect.DeepEqual(firstUsage, &AgentUsage{PromptTokens: 1, CachedTokens: 2, CompletionTokens: 3}) {
+		t.Fatalf("AddUsage mutated its input = %+v", firstUsage)
+	}
+	result.AddUsage(nil)
+	var nilResult *DefaultToolResult
+	if nilResult.AddUsage(firstUsage) != nil || nilResult.Usage() != nil {
+		t.Fatal("nil default result should ignore usage")
+	}
 	multi := &MultimodalToolResult{Text: "text", Images: []*schema.ContentBlock{TextBlock("image")}}
-	if multi.String() != "text" || len(multi.ImageParts()) != 1 {
+	if multi.String() != "text" || len(multi.ImageParts()) != 1 || multi.Usage() != nil {
 		t.Fatalf("multimodal result = %+v", multi)
 	}
 }

@@ -14,10 +14,13 @@ type ToolResult interface {
 	// ImageParts returns image content parts from the tool result.
 	// Returns nil if the result contains no images.
 	ImageParts() []*schema.ContentBlock
+	// Usage returns any agent usage incurred while producing the tool result.
+	Usage() *AgentUsage
 }
 
 type DefaultToolResult struct {
-	Result string `json:"result"`
+	Result    string      `json:"result"`
+	ToolUsage *AgentUsage `json:"usage,omitempty"`
 }
 
 func (d *DefaultToolResult) String() string {
@@ -26,6 +29,26 @@ func (d *DefaultToolResult) String() string {
 
 func (d *DefaultToolResult) ImageParts() []*schema.ContentBlock {
 	return nil
+}
+
+func (d *DefaultToolResult) Usage() *AgentUsage {
+	if d == nil {
+		return nil
+	}
+	return d.ToolUsage
+}
+
+// AddUsage adds usage incurred while producing this result.
+func (d *DefaultToolResult) AddUsage(usage *AgentUsage) *DefaultToolResult {
+	if d == nil || usage == nil {
+		return d
+	}
+	if d.ToolUsage == nil {
+		d.ToolUsage = usage.Clone()
+		return d
+	}
+	d.ToolUsage.Add(usage)
+	return d
 }
 
 func NewDefaultToolResult(result string) *DefaultToolResult {
@@ -315,4 +338,8 @@ func (m *MultimodalToolResult) String() string {
 
 func (m *MultimodalToolResult) ImageParts() []*schema.ContentBlock {
 	return m.Images
+}
+
+func (m *MultimodalToolResult) Usage() *AgentUsage {
+	return nil
 }

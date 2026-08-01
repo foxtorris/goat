@@ -133,6 +133,10 @@ func (r *mcpToolResult) ImageParts() []*schema.ContentBlock {
 	return images
 }
 
+func (r *mcpToolResult) Usage() *AgentUsage {
+	return nil
+}
+
 func (r *mcpToolResult) String() string {
 	if r == nil {
 		return ""

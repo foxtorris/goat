@@ -714,6 +714,7 @@ func (a *Agent) Do(
 				assistantMessage := assistantMessageFromResponse(raw)
 
 				toolResults := make([]*schema.FunctionToolResult, len(toolCalls))
+				toolUsages := make([]*common.AgentUsage, len(toolCalls))
 				type preparedToolCall struct {
 					call      *schema.FunctionToolCall
 					tool      common.Tool
@@ -836,6 +837,7 @@ func (a *Agent) Do(
 
 						observation := result.String()
 						images := append([]*schema.ContentBlock(nil), result.ImageParts()...)
+						toolUsages[index] = result.Usage()
 						toolResults[index] = &schema.FunctionToolResult{
 							CallID:  item.call.CallID,
 							Name:    item.call.Name,
@@ -856,6 +858,9 @@ func (a *Agent) Do(
 				}
 
 				p.StopAndWait()
+				for _, usage := range toolUsages {
+					addRunUsage(runUsage, usage)
+				}
 				batchErrMu.Lock()
 				err = batchErr
 				batchErrMu.Unlock()
