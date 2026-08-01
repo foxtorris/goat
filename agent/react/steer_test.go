@@ -35,10 +35,18 @@ func newBlockingSteerModel(responses ...*schema.AgenticMessage) *blockingSteerMo
 }
 
 func (m *blockingSteerModel) Generate(
+	_ context.Context,
+	_ []*schema.AgenticMessage,
+	_ ...model.Option,
+) (*schema.AgenticMessage, error) {
+	return nil, errors.New("unexpected Generate call")
+}
+
+func (m *blockingSteerModel) Stream(
 	ctx context.Context,
 	input []*schema.AgenticMessage,
 	_ ...model.Option,
-) (*schema.AgenticMessage, error) {
+) (*schema.StreamReader[*schema.AgenticMessage], error) {
 	m.mu.Lock()
 	m.inputs = append(m.inputs, common.CloneAgenticMessages(input))
 	call := len(m.inputs)
@@ -55,15 +63,7 @@ func (m *blockingSteerModel) Generate(
 	if call > len(m.responses) {
 		return nil, fmt.Errorf("unexpected Generate call %d", call)
 	}
-	return m.responses[call-1], nil
-}
-
-func (m *blockingSteerModel) Stream(
-	context.Context,
-	[]*schema.AgenticMessage,
-	...model.Option,
-) (*schema.StreamReader[*schema.AgenticMessage], error) {
-	return nil, errors.New("unexpected Stream call")
+	return schema.StreamReaderFromArray([]*schema.AgenticMessage{m.responses[call-1]}), nil
 }
 
 func (m *blockingSteerModel) recordedInputs() [][]*schema.AgenticMessage {
@@ -87,7 +87,7 @@ func TestFinalAnswerDiscardsPendingSteeringAndClosesInbox(t *testing.T) {
 	manager := ram.NewRAMContextManager()
 	agent := NewAgent(llm, 128, manager)
 
-	contextUID, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "original request"},
 		MaxStep:   4,
 	})
@@ -114,12 +114,14 @@ func TestFinalAnswerDiscardsPendingSteeringAndClosesInbox(t *testing.T) {
 	}
 	close(llm.releaseFirst)
 
-	steps := readAllSteps(t, ctx, stepStream)
-	if len(steps) != 1 || !steps[0].IsFinalAnswer {
-		t.Fatalf("steps = %+v, want one final step", steps)
+	events := readAllEvents(t, ctx, eventStream)
+	finalAnswers := eventsByType[common.FinalAnswerCompletedEvent](events)
+	if len(finalAnswers) != 1 || finalAnswers[0].Answer != "final answer" {
+		t.Fatalf("final answer events = %+v", finalAnswers)
 	}
-	if steps[0].Observation != "final answer" {
-		t.Fatalf("final observation = %q", steps[0].Observation)
+	terminals := terminalEvents(events)
+	if len(terminals) != 1 || terminals[0].Type() != common.AgentEventTypeRunCompleted {
+		t.Fatalf("terminal events = %+v", terminals)
 	}
 	if got := len(llm.recordedInputs()); got != 1 {
 		t.Fatalf("model call count = %d, want 1", got)
@@ -169,7 +171,7 @@ func TestSteerIsAppliedAfterCompleteToolTurn(t *testing.T) {
 		},
 	))
 
-	contextUID, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "use the tool"},
 		MaxStep:   4,
 	})
@@ -193,15 +195,18 @@ func TestSteerIsAppliedAfterCompleteToolTurn(t *testing.T) {
 	}
 	close(llm.releaseFirst)
 
-	steps := readAllSteps(t, ctx, stepStream)
-	if len(steps) != 2 {
-		t.Fatalf("step count = %d, want tool and final", len(steps))
+	events := readAllEvents(t, ctx, eventStream)
+	completedTools := eventsByType[common.ToolCallCompletedEvent](events)
+	if len(completedTools) != 1 || completedTools[0].Result != "tool observation" {
+		t.Fatalf("tool completed events = %+v", completedTools)
 	}
-	if !steps[0].UseToolOrNot || steps[0].IsFinalAnswer {
-		t.Fatalf("first step is not a tool step: %+v", steps[0])
+	steeringEvents := eventsByType[common.SteeringAppliedEvent](events)
+	if len(steeringEvents) != 1 || steeringEvents[0].Count != 2 {
+		t.Fatalf("steering events = %+v", steeringEvents)
 	}
-	if !steps[1].IsFinalAnswer || steps[1].Observation != "final after steer" {
-		t.Fatalf("second step = %+v, want final answer", steps[1])
+	finalAnswers := eventsByType[common.FinalAnswerCompletedEvent](events)
+	if len(finalAnswers) != 1 || finalAnswers[0].Answer != "final after steer" {
+		t.Fatalf("final answer events = %+v", finalAnswers)
 	}
 
 	inputs := llm.recordedInputs()
@@ -217,22 +222,42 @@ func TestSteerIsAppliedAfterCompleteToolTurn(t *testing.T) {
 	}
 }
 
-func readAllSteps(
+func readAllEvents(
 	t *testing.T,
 	ctx context.Context,
-	stepStream streaming.Stream[*common.Step],
-) []*common.Step {
+	eventStream streaming.Stream[common.AgentEvent],
+) []common.AgentEvent {
 	t.Helper()
 
-	steps := make([]*common.Step, 0)
+	events := make([]common.AgentEvent, 0)
 	for {
-		step, err := stepStream.ReadWithContext(ctx)
+		event, err := eventStream.ReadWithContext(ctx)
 		if errors.Is(err, streaming.ErrStreamClosed) {
-			return steps
+			return events
 		}
 		if err != nil {
-			t.Fatalf("read step: %v", err)
+			t.Fatalf("read event: %v", err)
 		}
-		steps = append(steps, step)
+		events = append(events, event)
 	}
+}
+
+func eventsByType[T common.AgentEvent](events []common.AgentEvent) []T {
+	result := make([]T, 0)
+	for _, event := range events {
+		if typed, ok := event.(T); ok {
+			result = append(result, typed)
+		}
+	}
+	return result
+}
+
+func terminalEvents(events []common.AgentEvent) []common.AgentEvent {
+	result := make([]common.AgentEvent, 0, 1)
+	for _, event := range events {
+		if common.IsTerminalAgentEvent(event) {
+			result = append(result, event)
+		}
+	}
+	return result
 }

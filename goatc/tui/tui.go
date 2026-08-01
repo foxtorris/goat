@@ -48,6 +48,7 @@ type runStartedMsg struct {
 }
 
 type answerChunkMsg string
+type finalAnswerMsg string
 
 type toolStartedMsg struct {
 	name  string
@@ -66,6 +67,7 @@ type runFinishedMsg struct {
 }
 
 type runErrorMsg struct{ err error }
+type runInterruptedMsg struct{ reason string }
 type steerResultMsg struct{ err error }
 
 // Run starts the interactive terminal interface.
@@ -153,6 +155,13 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.appendText(string(msg))
 		commands = append(commands, m.waitForEvent())
+	case finalAnswerMsg:
+		if !m.answerOpen && msg != "" {
+			m.appendText(agentStyle.Render(m.config.Agent.Name) + "\n")
+			m.answerOpen = true
+			m.appendText(string(msg))
+		}
+		commands = append(commands, m.waitForEvent())
 	case toolStartedMsg:
 		m.closeAnswer()
 		m.appendText(toolStyle.Render(fmt.Sprintf("● %s", msg.name)) + " " + mutedStyle.Render(fmt.Sprint(msg.input)) + "\n")
@@ -179,6 +188,14 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = "error"
 			m.appendText(errorStyle.Render("Error: "+msg.err.Error()) + "\n\n")
+		}
+	case runInterruptedMsg:
+		m.closeAnswer()
+		m.running = false
+		m.cancel = nil
+		m.status = "interrupted"
+		if msg.reason != "" {
+			m.appendText(mutedStyle.Render(msg.reason) + "\n\n")
 		}
 	case steerResultMsg:
 		if msg.err != nil {
@@ -214,41 +231,23 @@ func (m *model) startRun(runCtx context.Context, cancel context.CancelFunc, text
 			Compress:            m.config.Agent.Compress,
 			SkillsDir:           m.config.Agent.SkillsDir,
 			SpecialRequirements: m.config.Agent.SpecialRequirements,
-			Callbacks: &common.Callbacks{
-				BeforeToolExecution: func(_ *common.AgentContext, step *common.Step) {
-					if !step.IsFinalAnswer {
-						m.events <- toolStartedMsg{name: step.ToolName, input: step.ActionInputParam}
-					}
-				},
-				AfterToolExecution: func(_ *common.AgentContext, step *common.Step) {
-					if !step.IsFinalAnswer {
-						m.events <- toolFinishedMsg{name: step.ToolName, result: step.Observation}
-					}
-				},
-			},
-			FinalAnswerStreamingFunc: func(_ context.Context, chunk []byte) error {
-				m.events <- answerChunkMsg(string(chunk))
-				return nil
-			},
 		}
 		if parallel > 0 {
 			args.ToolExecutionOptions = &common.ToolExecutionOptions{EnableParallel: true, MaxConcurrency: parallel}
 		}
-		uid, steps, err := m.agent.Do(runCtx, args)
+		uid, events, err := m.agent.Do(runCtx, args)
 		if err != nil {
 			cancel()
 			return runErrorMsg{err: err}
 		}
 		go func() {
 			defer cancel()
-			var prompt, cached, completion int
+			terminalSeen := false
 			for {
-				step, readErr := steps.ReadWithContext(runCtx)
+				event, readErr := events.ReadWithContext(m.ctx)
 				if errors.Is(readErr, streaming.ErrStreamClosed) {
-					if err := runCtx.Err(); err != nil {
-						m.events <- runErrorMsg{err: err}
-					} else {
-						m.events <- runFinishedMsg{promptTokens: prompt, cachedTokens: cached, completionTokens: completion}
+					if !terminalSeen {
+						m.events <- runErrorMsg{err: errors.New("agent event stream closed without a terminal event")}
 					}
 					return
 				}
@@ -256,10 +255,38 @@ func (m *model) startRun(runCtx context.Context, cancel context.CancelFunc, text
 					m.events <- runErrorMsg{err: readErr}
 					return
 				}
-				if step.Usage != nil {
-					prompt += step.Usage.PromptTokens
-					cached += step.Usage.CachedTokens
-					completion += step.Usage.CompletionTokens
+
+				switch typed := event.(type) {
+				case common.AssistantTextDeltaEvent:
+					m.events <- answerChunkMsg(typed.Delta)
+				case common.FinalAnswerCompletedEvent:
+					m.events <- finalAnswerMsg(typed.Answer)
+				case common.ToolCallStartedEvent:
+					m.events <- toolStartedMsg{name: typed.Name, input: typed.Arguments}
+				case common.ToolCallCompletedEvent:
+					m.events <- toolFinishedMsg{name: typed.Name, result: typed.Result}
+				case common.ToolCallFailedEvent:
+					m.events <- toolFinishedMsg{name: typed.Name, result: "Error: " + typed.Error}
+				case common.RunCompletedEvent:
+					terminalSeen = true
+					usage := typed.Usage
+					if usage == nil {
+						usage = &common.AgentUsage{}
+					}
+					m.events <- runFinishedMsg{
+						promptTokens:     usage.PromptTokens,
+						cachedTokens:     usage.CachedTokens,
+						completionTokens: usage.CompletionTokens,
+					}
+				case common.RunInterruptedEvent:
+					terminalSeen = true
+					m.events <- runInterruptedMsg{reason: typed.Reason}
+				case common.RunCanceledEvent:
+					terminalSeen = true
+					m.events <- runErrorMsg{err: context.Canceled}
+				case common.RunFailedEvent:
+					terminalSeen = true
+					m.events <- runErrorMsg{err: errors.New(typed.Error)}
 				}
 			}
 		}()

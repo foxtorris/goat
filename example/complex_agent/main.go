@@ -1,6 +1,6 @@
 // Command complex_agent demonstrates a multi-step OpenAI agent with planning,
-// parallel tool execution, run-scoped metadata, callbacks, context compression,
-// final-answer streaming, and token accounting.
+// parallel tool execution, run-scoped metadata, context compression, typed
+// lifecycle events, final-answer streaming, and token accounting.
 //
 // The tools use deterministic in-memory incident data so the example only
 // needs an OpenAI API key and never touches a production system.
@@ -61,7 +61,7 @@ func main() {
 
 	fmt.Printf("Model: %s\nQuestion: %s\n\n", envOr("OPENAI_MODEL", "gpt-5.2"), *question)
 
-	contextUID, steps, err := agent.Do(ctx, &common.AgentDoArgs{
+	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: *question},
 		ContextMeta: map[common.AgentDoMetaKey]any{
 			regionMetaKey: "eu-west",
@@ -84,55 +84,52 @@ func main() {
 			"Do not claim that a mitigation was executed; this agent has read-only tools.",
 			"Present evidence, confidence, immediate mitigation, and follow-up actions.",
 		},
-		Callbacks: &common.Callbacks{
-			BeforeToolExecution: func(_ *common.AgentContext, step *common.Step) {
-				if !step.IsFinalAnswer {
-					printLocked("[start] %-24s input=%v\n", step.ToolName, step.ActionInputParam)
-				}
-			},
-			AfterToolExecution: func(_ *common.AgentContext, step *common.Step) {
-				if !step.IsFinalAnswer {
-					printLocked("[done ] %-24s %s\n", step.ToolName, abbreviate(step.Observation, 180))
-				}
-			},
-		},
-		FinalAnswerStreamingFunc: func(_ context.Context, chunk []byte) error {
-			printLocked("%s", chunk)
-			return nil
-		},
 	})
 	if err != nil {
 		log.Fatalf("start agent: %v", err)
 	}
 
-	var promptTokens, cachedTokens, completionTokens, toolSteps int
+	var usage *common.AgentUsage
+	toolCalls := 0
 	finalStarted := false
 	for {
-		step, readErr := steps.ReadWithContext(ctx)
+		event, readErr := eventStream.ReadWithContext(ctx)
 		if errors.Is(readErr, streaming.ErrStreamClosed) {
 			break
 		}
 		if readErr != nil {
 			log.Fatalf("read agent stream: %v", readErr)
 		}
-		if step.Usage != nil {
-			promptTokens += step.Usage.PromptTokens
-			cachedTokens += step.Usage.CachedTokens
-			completionTokens += step.Usage.CompletionTokens
-		}
-		if step.IsFinalAnswer {
+		switch typed := event.(type) {
+		case common.AssistantTextDeltaEvent:
+			printLocked("%s", typed.Delta)
+		case common.ToolCallStartedEvent:
+			printLocked("[start] %-24s input=%v\n", typed.Name, typed.Arguments)
+		case common.ToolCallCompletedEvent:
+			printLocked("[done ] %-24s %s\n", typed.Name, abbreviate(typed.Result, 180))
+		case common.ToolCallFailedEvent:
+			printLocked("[fail ] %-24s %s\n", typed.Name, typed.Error)
+		case common.FinalAnswerCompletedEvent:
 			finalStarted = true
-		} else if step.UseToolOrNot {
-			toolSteps++
+		case common.RunCompletedEvent:
+			usage = typed.Usage
+			toolCalls = typed.ToolCalls
+		case common.RunFailedEvent:
+			log.Fatalf("agent run failed during %s: %s", typed.Operation, typed.Error)
+		case common.RunCanceledEvent:
+			log.Fatalf("agent run canceled: %s", typed.Reason)
 		}
+	}
+	if usage == nil {
+		usage = &common.AgentUsage{}
 	}
 
 	if finalStarted {
 		fmt.Println()
 	}
 	fmt.Printf("\nConversation: %s\n", contextUID)
-	fmt.Printf("Tool steps: %d\n", toolSteps)
-	fmt.Printf("Token usage: prompt=%d cached=%d completion=%d\n", promptTokens, cachedTokens, completionTokens)
+	fmt.Printf("Tool calls: %d\n", toolCalls)
+	fmt.Printf("Token usage: prompt=%d cached=%d completion=%d\n", usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 }
 
 func newOpenAIModel(ctx context.Context) (*agenticopenai.ResponsesModel, error) {

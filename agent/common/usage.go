@@ -1,9 +1,9 @@
 package common
 
 type AgentUsage struct {
-	PromptTokens     int
-	CachedTokens     int
-	CompletionTokens int
+	PromptTokens     int `json:"prompt_tokens"`
+	CachedTokens     int `json:"cached_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
 }
 
 func NewAgentUsage(promptTokens, cachedTokens, completionTokens int) *AgentUsage {

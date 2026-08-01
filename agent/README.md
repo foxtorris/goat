@@ -1,6 +1,6 @@
 # Agent SDK
 
-`agent` is goat's Go agent SDK. Built on CloudWeGo Eino's `model.AgenticModel`, it provides native model tool calling, conversation context management, context compression, task planning, skills, MCP integration, tool plugins, multimodal input, and streaming result callbacks.
+`agent` is goat's Go agent SDK. Built on CloudWeGo Eino's `model.AgenticModel`, it provides native model tool calling, conversation context management, context compression, task planning, skills, MCP integration, tool plugins, multimodal input, and typed runtime events.
 
 The current agent implementation lives in `react`. The model decides whether and how to call tools; the SDK executes those tools, persists messages, manages context, and produces the final answer.
 
@@ -15,19 +15,19 @@ The current agent implementation lives in `react`. The model decides whether and
 - Per-run skill loading from a configurable directory, propagated to tools through `AgentContext` metadata.
 - MCP tools, Go shared-library plugins, and gRPC tool plugins.
 - Text, image URL, Base64 image, and binary image input.
-- A per-run step stream returned directly by `Do`, with token usage, execution callbacks, final-answer streaming, and final-answer webhooks.
+- A per-run event stream returned directly by `Do`, with model deltas, tool lifecycle events, aggregate token usage, explicit terminal states, and final-answer webhooks.
 
 ## Directory structure
 
 ```text
 agent/
 ├── common/                  # Shared agent, message, tool, context, and configuration types
-│   ├── agent.go             # Agent, AgentDoArgs, callbacks, and compression configuration
+│   ├── agent.go             # Agent, AgentDoArgs, and compression configuration
 │   ├── agentic_message.go   # Text and image message constructors
 │   ├── ctx.go               # AgentContext with concurrency-safe metadata
 │   ├── context_uid.go       # ContextUID conversation identifier
+│   ├── event.go             # Strongly typed runtime events
 │   ├── mcp_tool.go          # MCP Tool to common.Tool adapter
-│   ├── step.go              # Agent execution step type
 │   └── tool.go              # Tool, ToolResult, and JSON Schema helpers
 ├── contextmgr/
 │   ├── context_manager.go   # ContextManager interface
@@ -93,41 +93,47 @@ func main() {
 
 	agent := react.NewAgent(llm, 128, ram.NewRAMContextManager())
 
-	contextUID, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "Introduce the goat Agent SDK in three sentences."},
 		MaxStep:   8,
-		FinalAnswerStreamingFunc: func(_ context.Context, chunk []byte) error {
-			fmt.Print(string(chunk))
-			return nil
-		},
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	var promptTokens, cachedTokens, completionTokens int
+	var usage *common.AgentUsage
 	for {
-		step, err := stepStream.ReadWithContext(ctx)
+		event, err := eventStream.ReadWithContext(ctx)
 		if errors.Is(err, streaming.ErrStreamClosed) {
 			break
 		}
 		if err != nil {
 			log.Fatal(err)
 		}
-		if step.Usage != nil {
-			promptTokens += step.Usage.PromptTokens
-			cachedTokens += step.Usage.CachedTokens
-			completionTokens += step.Usage.CompletionTokens
+		switch event := event.(type) {
+		case common.AssistantTextDeltaEvent:
+			fmt.Print(event.Delta)
+		case common.RunCompletedEvent:
+			usage = event.Usage
+		case common.RunInterruptedEvent:
+			log.Printf("agent interrupted: %s", event.Reason)
+		case common.RunCanceledEvent:
+			log.Fatalf("agent canceled: %s", event.Reason)
+		case common.RunFailedEvent:
+			log.Fatalf("agent failed during %s: %s", event.Operation, event.Error)
 		}
+	}
+	if usage == nil {
+		usage = &common.AgentUsage{}
 	}
 
 	fmt.Printf("\nContextUID: %s\n", contextUID)
 	fmt.Printf("Token usage: prompt=%d cached=%d completion=%d\n",
-		promptTokens, cachedTokens, completionTokens)
+		usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 }
 ```
 
-`Do` stores the current user message, starts the agent loop in the background, and immediately returns the run's `ContextUID` and `Step` stream. Every call to `Do` has an independent stream, so callers do not need to poll the context manager to infer run boundaries. The stream closes when the agent finishes normally, is interrupted, the context is canceled, or background execution fails. Tool steps enter the stream after execution and callbacks complete; the final-answer step enters the stream after it has been persisted. `Step.ModelUsage` records SDK model calls, `Step.CallbackUsage` can record usage produced by callbacks, and `Step.Usage` is their total.
+`Do` stores the current user message, starts the agent loop in the background, and immediately returns the run's `ContextUID` and `common.AgentEvent` stream. Every call has an independent stream, so callers do not need to poll the context manager to infer run boundaries. Each item is a concrete event value with no wrapper envelope. A normally consumed stream contains exactly one of `RunCompletedEvent`, `RunInterruptedEvent`, `RunCanceledEvent`, or `RunFailedEvent`, then closes. Errors returned directly by `Do` are synchronous setup failures; failures after `Do` returns are reported by `RunFailedEvent`.
 
 ## Steering a running conversation
 
@@ -192,7 +198,7 @@ To pause the background agent loop after a tool runs—for example, while waitin
 agent.AddTool(ctx, common.InterruptLoopAfter(approvalTool))
 ```
 
-The wrapped tool still executes and its result is persisted. After the current tool batch is stored, the SDK stops the background loop without returning the pause as an error from `Do`.
+The wrapped tool still executes and its result is persisted. After the current tool batch is stored, the SDK stops the background loop and submits a `RunInterruptedEvent` rather than treating the pause as an error from `Do`.
 
 ## Run options
 
@@ -207,12 +213,10 @@ The main fields in `common.AgentDoArgs` are:
 | `Compress` | Whether to compress context as it approaches the model limit. |
 | `CompressionOptions` | Compression strategy and number of recent messages to retain. |
 | `ContextMeta` | Concurrency-safe metadata injected into the run's `AgentContext`. |
-| `Callbacks` | Hooks that run before and after tool or final-answer steps. |
-| `FinalAnswerStreamingFunc` | Receives streamed byte chunks from the final answer. |
 | `FinalAnswerWebhook` | Sends an HTTP webhook after the final answer is persisted. |
 | `EnablePlanning` | Exposes the built-in plan creation and update tools to the model. |
 | `PlanUsageInstruction` | Tells the model when and how to create plans while planning is enabled. |
-| `ToolExecutionOptions` | Controls parallel tool execution and maximum concurrency while planning is enabled. |
+| `ToolExecutionOptions` | Controls parallel tool execution and maximum concurrency. |
 | `SkillsDir` | Skill root for this run. Empty uses `skills`; the resolved path is available through `AgentContext` metadata. |
 | `SkillUsageInstruction` | Tells the model when and how to use skills. |
 
@@ -292,7 +296,7 @@ _, secondRun, err := agent.Do(ctx, &common.AgentDoArgs{
 // Read secondRun until it returns streaming.ErrStreamClosed.
 ```
 
-When continuing a conversation, the SDK loads its history and updates the system prompt with the current run options. Appending the new `Do` user input reopens steering after the previous final answer. Because `Do` starts the agent loop asynchronously, drain the previous step stream until it closes before starting another run with the same `ContextUID`. This confirms that the previous run has finished or paused.
+When continuing a conversation, the SDK loads its history and updates the system prompt with the current run options. Appending the new `Do` user input reopens steering after the previous final answer. Because `Do` starts the agent loop asynchronously, drain the previous event stream until it closes before starting another run with the same `ContextUID`. This confirms that the previous run has finished or paused.
 
 ## Multimodal input
 
@@ -320,7 +324,7 @@ Image support and support for the `detail` parameter depend on the selected `mod
 `NewAgent` registers the built-in `generate_plan` and `update_plan` tools, but exposes them to the model only when planning is enabled.
 
 ```go
-_, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
+_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 	UserInput:      common.AgentUserInput{Text: "Analyze the project and complete the refactor."},
 	EnablePlanning: true,
 	PlanUsageInstruction: "Create a plan for complex tasks and update it after completing each step.",
@@ -349,7 +353,7 @@ skills/
 ```go
 agent.AddSkills(ctx)
 
-_, steps, err := agent.Do(ctx, &common.AgentDoArgs{
+_, events, err := agent.Do(ctx, &common.AgentDoArgs{
 	UserInput: common.AgentUserInput{Text: "Review this change."},
 	SkillsDir: "./project-skills",
 })
@@ -361,7 +365,7 @@ An empty `SkillsDir` uses `common.SkillDefaultFolder` (`skills`). `AddSkills` ma
 agent.AddSkills(ctx, "experimental-skill")
 ```
 
-Skill headers are discovered from the selected directory while building that run's system prompt. The resolved directory is stored under `common.InternalToolSkillsDirMetaKey` in the run's `AgentContext`; `load_skills`, `read_specified_file_in_skill`, custom tools, and callbacks therefore use the same per-run root:
+Skill headers are discovered from the selected directory while building that run's system prompt. The resolved directory is stored under `common.InternalToolSkillsDirMetaKey` in the run's `AgentContext`; `load_skills`, `read_specified_file_in_skill`, and custom tools therefore use the same per-run root:
 
 ```go
 skillsDir := common.SkillsDirFromContext(agentContext)
@@ -391,43 +395,56 @@ err := agent.LoadRPCPluginTools(ctx, "127.0.0.1:50051")
 
 See the [tool plugin cookbook](toolplugin/README.md) for plugin interfaces, build instructions, and a gRPC service example.
 
-## Callbacks, streams, and webhooks
+## Events and webhooks
 
-### Execution callbacks
+### Reading the event stream
 
-```go
-Callbacks: &common.Callbacks{
-	BeforeToolExecution: func(ctx *common.AgentContext, step *common.Step) {
-		fmt.Printf("before: %s\n", step.ToolName)
-	},
-	AfterToolExecution: func(ctx *common.AgentContext, step *common.Step) {
-		fmt.Printf("after: %s\n", step.Observation)
-	},
-},
-```
-
-`AfterToolExecution` may modify `step.Observation` or set `step.OptimizationAdvice`, which injects guidance into the next model context. Both callbacks also receive final-answer steps, so inspect `step.IsFinalAnswer` to distinguish step types. If a callback invokes a model and produces token usage, merge it with `step.AddCallbackUsage(promptTokens, cachedTokens, completionTokens)` instead of overwriting usage recorded by the SDK.
-
-### Reading the step stream
-
-`Do` returns the current run's `common.Step` stream directly, so context manager polling is unnecessary. Tool-call steps include callback-processed input, observations, images, and usage. The final answer is emitted as a step where `IsFinalAnswer == true`.
+`Do` keeps its single-call shape and returns `streaming.Stream[common.AgentEvent]`. The runtime submits concrete event values directly to this stream, and consumers use a Go type switch without an emitter API or an additional event envelope.
 
 ```go
-contextUID, stepStream, err := agent.Do(ctx, args)
+contextUID, eventStream, err := agent.Do(ctx, args)
 if err != nil {
 	return err
 }
 for {
-	step, err := stepStream.ReadWithContext(ctx)
+	event, err := eventStream.ReadWithContext(ctx)
 	if errors.Is(err, streaming.ErrStreamClosed) {
 		break
 	}
 	if err != nil {
 		return err
 	}
-	fmt.Printf("conversation=%s step=%+v\n", contextUID, step)
+
+	switch event := event.(type) {
+	case common.AssistantTextDeltaEvent:
+		fmt.Print(event.Delta)
+	case common.ToolCallRequestedEvent:
+		fmt.Printf("tool requested: %s(%v)\n", event.Name, event.Arguments)
+	case common.ToolCallCompletedEvent:
+		fmt.Printf("tool completed: %s -> %s\n", event.Name, event.Result)
+	case common.ToolCallFailedEvent:
+		fmt.Printf("tool failed: %s -> %s\n", event.Name, event.Error)
+	case common.FinalAnswerCompletedEvent:
+		fmt.Printf("final answer stored for %s\n", contextUID)
+	case common.RunFailedEvent:
+		return fmt.Errorf("agent failed during %s: %s", event.Operation, event.Error)
+	}
 }
 ```
+
+The event families are:
+
+| Family | Events |
+| --- | --- |
+| Run lifecycle | `RunStartedEvent`, `RunCompletedEvent`, `RunInterruptedEvent`, `RunCanceledEvent`, `RunFailedEvent` |
+| Model calls | `ModelCallStartedEvent`, `AssistantTextDeltaEvent`, `ModelCallCompletedEvent`, `ModelCallFailedEvent` |
+| Context compression | `ContextCompressionStartedEvent`, `ContextCompressionCompletedEvent`, `ContextCompressionFailedEvent` |
+| Tool calls | `ToolCallRequestedEvent`, `ToolCallStartedEvent`, `ToolCallCompletedEvent`, `ToolCallFailedEvent` |
+| Steering and answer | `SteeringAppliedEvent`, `FinalAnswerCompletedEvent` |
+
+`AssistantTextDeltaEvent` is the generic live text event for streamed model calls. `FinalAnswerCompletedEvent` carries the settled answer only after it has been committed to conversation history. `ModelCallCompletedEvent.Usage` is scoped to one model call; each terminal event's `Usage` is the aggregate for the run. With parallel tools, completion and failure events arrive in actual completion order, while tool-result messages sent back to the model retain the model's original request order.
+
+Always inspect the terminal event. A stream close is only the transport boundary; `RunFailedEvent` is how asynchronous model, persistence, or runtime failures are surfaced after `Do` has returned.
 
 ### Final-answer webhook
 
@@ -441,7 +458,7 @@ FinalAnswerWebhook: &common.FinalAnswerWebhookConfig{
 },
 ```
 
-The webhook payload contains the event name, agent name, `ContextUID`, user input, final answer, and generation time. Consume execution steps from the stream returned by `Do`; the payload's `steps` field is currently empty.
+The webhook payload contains the event name, agent name, `ContextUID`, user input, final answer, and generation time. Runtime lifecycle and tool details remain in the event stream and are not duplicated in the webhook payload.
 
 ## Built-in tools
 
@@ -474,5 +491,5 @@ go test ./agent/react/... ./agent/tools ./agent/contextmgr/sqlite ./agent/toolpl
 - Prefer SQLite or MySQL context managers in production. The RAM context manager is intended for tests and short-lived processes.
 - Validate tool parameter types; never trust model-generated arguments directly.
 - Add authorization, idempotency, timeouts, and audit logging to tools with side effects.
-- Read `Step.Usage` from the stream returned by `Do` or from execution callbacks when aggregating tokens. If one model response triggers multiple tool calls, model usage appears only on the first tool step in that batch to prevent double counting.
+- Read aggregate token usage from the terminal event. Use `ModelCallCompletedEvent.Usage` only when per-call accounting is needed.
 - Use `context.WithTimeout` or `context.WithCancel` to control the lifecycle of the complete agent run.

@@ -112,7 +112,7 @@ func AzureOpenAITest() {
 		panic(err)
 	}
 	agent := react.NewAgent(llm, 128, manager)
-	contextUID, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "Say hello in one sentence."},
 		MaxStep:   4,
 	})
@@ -120,24 +120,25 @@ func AzureOpenAITest() {
 		panic(err)
 	}
 
-	var promptTokens, cachedTokens, completionTokens int
+	var usage *common.AgentUsage
 	for {
-		step, err := stepStream.ReadWithContext(ctx)
+		event, err := eventStream.ReadWithContext(ctx)
 		if errors.Is(err, streaming.ErrStreamClosed) {
 			break
 		}
 		if err != nil {
 			panic(err)
 		}
-		if step.Usage != nil {
-			promptTokens += step.Usage.PromptTokens
-			cachedTokens += step.Usage.CachedTokens
-			completionTokens += step.Usage.CompletionTokens
+		if completed, ok := event.(common.RunCompletedEvent); ok {
+			usage = completed.Usage
 		}
+	}
+	if usage == nil {
+		usage = &common.AgentUsage{}
 	}
 
 	fmt.Println("conversation:", contextUID)
-	fmt.Printf("usage: prompt=%d cached=%d completion=%d\n", promptTokens, cachedTokens, completionTokens)
+	fmt.Printf("usage: prompt=%d cached=%d completion=%d\n", usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 }
 
 func OpenAIAgentInterruptTest() {
@@ -172,7 +173,7 @@ func OpenAIAgentInterruptTest() {
 	)
 	agent.AddTool(ctx, common.InterruptLoopAfter(approvalTool))
 
-	contextUID, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{
 			Text: "Before doing anything else, request human approval for deploying to production. Use the request_human_approval tool and then wait.",
 		},
@@ -189,38 +190,49 @@ func OpenAIAgentInterruptTest() {
 		panic(err)
 	}
 
-	var interruptStep *common.Step
-	var promptTokens, cachedTokens, completionTokens int
+	var toolRequested *common.ToolCallRequestedEvent
+	var toolCompleted *common.ToolCallCompletedEvent
+	var usage *common.AgentUsage
+	interrupted := false
 	for {
-		step, err := stepStream.ReadWithContext(ctx)
+		event, err := eventStream.ReadWithContext(ctx)
 		if errors.Is(err, streaming.ErrStreamClosed) {
 			break
 		}
 		if err != nil {
 			panic(err)
 		}
-		if step.Usage != nil {
-			promptTokens += step.Usage.PromptTokens
-			cachedTokens += step.Usage.CachedTokens
-			completionTokens += step.Usage.CompletionTokens
-		}
-		if step.IsFinalAnswer {
-			panic(fmt.Sprintf("unexpected final answer before interrupt: %s", step.Observation))
-		}
-		if step.ToolName == approvalToolName {
-			interruptStep = step
+		switch typed := event.(type) {
+		case common.FinalAnswerCompletedEvent:
+			panic(fmt.Sprintf("unexpected final answer before interrupt: %s", typed.Answer))
+		case common.ToolCallRequestedEvent:
+			if typed.Name == approvalToolName {
+				copy := typed
+				toolRequested = &copy
+			}
+		case common.ToolCallCompletedEvent:
+			if typed.Name == approvalToolName {
+				copy := typed
+				toolCompleted = &copy
+			}
+		case common.RunInterruptedEvent:
+			interrupted = true
+			usage = typed.Usage
 		}
 	}
-	if interruptStep == nil {
-		panic("approval tool step was not streamed")
+	if toolRequested == nil || toolCompleted == nil || !interrupted {
+		panic("approval tool events or interrupted terminal event were not streamed")
+	}
+	if usage == nil {
+		usage = &common.AgentUsage{}
 	}
 
 	fmt.Println("conversation:", contextUID)
-	fmt.Printf("interrupt tool: %s\n", interruptStep.ToolName)
-	fmt.Printf("tool input: %+v\n", interruptStep.ActionInputParam)
-	fmt.Printf("tool observation: %s\n", interruptStep.Observation)
+	fmt.Printf("interrupt tool: %s\n", toolRequested.Name)
+	fmt.Printf("tool input: %+v\n", toolRequested.Arguments)
+	fmt.Printf("tool observation: %s\n", toolCompleted.Result)
 	fmt.Printf("context messages after interrupt: %d\n", manager.Len(ctx, contextUID))
-	fmt.Printf("usage: prompt=%d cached=%d completion=%d\n", promptTokens, cachedTokens, completionTokens)
+	fmt.Printf("usage: prompt=%d cached=%d completion=%d\n", usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 }
 
 func RetrieverTest() {

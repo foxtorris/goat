@@ -1,135 +1,162 @@
 package react
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
 
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/react/compression"
+	"github.com/torrischen/goat/streaming"
 	"github.com/torrischen/goat/util/logging"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
 
-type ThinkArgs struct {
-	UserInput                common.AgentUserInput
-	SpecialRequirements      []string
-	Compress                 bool
-	CompressionOptions       common.CompressionOptions
-	Messages                 []*schema.AgenticMessage
-	SystemPrompt             string
-	FinalAnswerStreamingFunc func(context.Context, []byte) error
+type thinkArgs struct {
+	Compress           bool
+	CompressionOptions common.CompressionOptions
+	Messages           []*schema.AgenticMessage
 }
 
-type ThinkResult struct {
+type thinkResult struct {
 	RawResponse        *schema.AgenticMessage
 	IsCompressed       bool
 	CompressedMessages []*schema.AgenticMessage
 	Messages           []*schema.AgenticMessage
-	PromptTokens       int
-	CachedTokens       int
-	CompletionTokens   int
+	ModelUsage         *common.AgentUsage
+	CompressionUsage   *common.AgentUsage
 }
 
-// Think generates the next step and determines if compression is needed
-func (a *Agent) Think(ctx *common.AgentContext, args *ThinkArgs, opts ...model.Option) (*ThinkResult, error) {
-	finalThinkResult := &ThinkResult{
-		IsCompressed: false,
-		Messages:     args.Messages,
-	}
-	promptTokens := 0
-	cachedTokens := 0
-	completionTokens := 0
+func (a *Agent) think(
+	ctx *common.AgentContext,
+	args *thinkArgs,
+	events streaming.Stream[common.AgentEvent],
+	opts ...model.Option,
+) (*thinkResult, error) {
+	result := &thinkResult{Messages: args.Messages}
 
-	// First, call the LLM to get the next step. When a final answer streaming
-	// callback is configured, read the model stream so direct final answers can
-	// be forwarded incrementally instead of after Generate returns.
-	raw, err := a.generateThinkResponse(ctx, args.Messages, args.FinalAnswerStreamingFunc, opts...)
-	if err != nil {
-		logging.Errorf("Agent.Think error: %v", err)
+	if err := events.WriteWithContext(ctx, common.ModelCallStartedEvent{Phase: common.ModelCallPhaseThink}); err != nil {
 		return nil, err
 	}
-
-	if raw == nil {
-		logging.Errorf("Agent.Think error: return content length 0")
-		return nil, fmt.Errorf("return content length 0")
+	raw, err := a.streamModelResponse(ctx, args.Messages, events, opts...)
+	if err != nil {
+		if writeErr := events.WriteWithContext(ctx, common.ModelCallFailedEvent{
+			Phase: common.ModelCallPhaseThink,
+			Error: err.Error(),
+		}); writeErr != nil {
+			return nil, fmt.Errorf("model call failed: %v; write failure event: %w", err, writeErr)
+		}
+		return nil, fmt.Errorf("think model call: %w", err)
 	}
 
-	choicePromptTokens, choiceCompletionTokens, choiceCachedTokens := messageTokens(raw)
-	promptTokens += choicePromptTokens
-	completionTokens += choiceCompletionTokens
-	cachedTokens += choiceCachedTokens
-
-	finalThinkResult.RawResponse = raw
-
-	// Now check if we need to compress by simulating the messages after this response
-	messagesWithNewStep := common.CloneAgenticMessages(args.Messages)
+	promptTokens, completionTokens, cachedTokens := messageTokens(raw)
+	result.ModelUsage = common.NewAgentUsage(promptTokens, cachedTokens, completionTokens)
 	toolCalls := functionToolCalls(raw)
+	if err := events.WriteWithContext(ctx, common.ModelCallCompletedEvent{
+		Phase:        common.ModelCallPhaseThink,
+		Usage:        result.ModelUsage.Clone(),
+		HasToolCalls: len(toolCalls) > 0,
+	}); err != nil {
+		return nil, err
+	}
+	result.RawResponse = raw
 
-	// Add the assistant's response to messages (simulating what will happen next)
+	messagesWithResponse := common.CloneAgenticMessages(args.Messages)
+	messagesWithResponse = append(messagesWithResponse, raw)
 	if len(toolCalls) > 0 {
-		// If there are tool calls, simulate the assistant message with tool calls.
-		messagesWithNewStep = append(messagesWithNewStep, raw)
-
-		// Simulate tool responses (rough estimation for token counting)
-		for _, tc := range toolCalls {
-			messagesWithNewStep = append(messagesWithNewStep, common.FunctionToolResultMessage(&schema.FunctionToolResult{
-				CallID: tc.CallID,
-				Name:   tc.Name,
+		for _, toolCall := range toolCalls {
+			if toolCall == nil {
+				continue
+			}
+			messagesWithResponse = append(messagesWithResponse, common.FunctionToolResultMessage(&schema.FunctionToolResult{
+				CallID: toolCall.CallID,
+				Name:   toolCall.Name,
 				Content: []*schema.FunctionToolResultContentBlock{
 					{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "..."}},
 				},
 			}))
 		}
-	} else {
-		// If no tool calls, add the final answer message
-		messagesWithNewStep = append(messagesWithNewStep, raw)
 	}
 
-	// Check if the messages with new step exceed token limit
-	if args.Compress && compression.ShouldCompress(messagesWithNewStep, a.modelMaxTokensK) {
-		logging.Infof("Agent.Think: Context size will exceed limit after this step, compressing...")
+	if !args.Compress || !compression.ShouldCompress(messagesWithResponse, a.modelMaxTokensK) {
+		return result, nil
+	}
 
-		compressedMessages, compressPromptTokens, compressCompletionTokens, compressCachedTokens, err := compression.Compress(
-			ctx,
-			a.llmClient,
-			args.Messages,
-			args.CompressionOptions,
-			opts...,
-		)
-		if err != nil {
-			logging.Errorf("Agent.Think: Failed to compress context: %v", err)
-		} else {
-			promptTokens += compressPromptTokens
-			completionTokens += compressCompletionTokens
-			cachedTokens += compressCachedTokens
+	strategy := normalizedCompressionStrategy(args.CompressionOptions.Strategy)
+	beforeMessages := len(args.Messages)
+	if err := events.WriteWithContext(ctx, common.ContextCompressionStartedEvent{
+		Strategy:       strategy,
+		BeforeMessages: beforeMessages,
+	}); err != nil {
+		return nil, err
+	}
 
-			finalThinkResult.IsCompressed = true
-			finalThinkResult.CompressedMessages = compressedMessages
-			finalThinkResult.Messages = compressedMessages
+	usesModel := strategy != common.CompressionStrategyDiscardHalf
+	if usesModel {
+		if err := events.WriteWithContext(ctx, common.ModelCallStartedEvent{
+			Phase: common.ModelCallPhaseCompression,
+		}); err != nil {
+			return nil, err
 		}
 	}
 
-	finalThinkResult.PromptTokens = promptTokens
-	finalThinkResult.CachedTokens = cachedTokens
-	finalThinkResult.CompletionTokens = completionTokens
-
-	return finalThinkResult, nil
-}
-
-func (a *Agent) generateThinkResponse(
-	ctx *common.AgentContext,
-	messages []*schema.AgenticMessage,
-	streamingFunc func(context.Context, []byte) error,
-	opts ...model.Option,
-) (*schema.AgenticMessage, error) {
-	if streamingFunc == nil {
-		return a.llmClient.Generate(ctx, messages, opts...)
+	compressedMessages, promptTokens, completionTokens, cachedTokens, compressErr := compression.Compress(
+		ctx,
+		a.llmClient,
+		args.Messages,
+		args.CompressionOptions,
+		opts...,
+	)
+	if compressErr != nil {
+		if usesModel {
+			if err := events.WriteWithContext(ctx, common.ModelCallFailedEvent{
+				Phase: common.ModelCallPhaseCompression,
+				Error: compressErr.Error(),
+			}); err != nil {
+				return nil, err
+			}
+		}
+		if err := events.WriteWithContext(ctx, common.ContextCompressionFailedEvent{
+			Strategy: strategy,
+			Error:    compressErr.Error(),
+		}); err != nil {
+			return nil, err
+		}
+		logging.Errorf("Agent.think: failed to compress context: %v", compressErr)
+		return result, nil
 	}
 
+	result.CompressionUsage = common.NewAgentUsage(promptTokens, cachedTokens, completionTokens)
+	if usesModel {
+		if err := events.WriteWithContext(ctx, common.ModelCallCompletedEvent{
+			Phase: common.ModelCallPhaseCompression,
+			Usage: result.CompressionUsage.Clone(),
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if err := events.WriteWithContext(ctx, common.ContextCompressionCompletedEvent{
+		Strategy:       strategy,
+		BeforeMessages: beforeMessages,
+		AfterMessages:  len(compressedMessages),
+	}); err != nil {
+		return nil, err
+	}
+
+	result.IsCompressed = true
+	result.CompressedMessages = compressedMessages
+	result.Messages = compressedMessages
+	return result, nil
+}
+
+func (a *Agent) streamModelResponse(
+	ctx *common.AgentContext,
+	messages []*schema.AgenticMessage,
+	events streaming.Stream[common.AgentEvent],
+	opts ...model.Option,
+) (*schema.AgenticMessage, error) {
 	reader, err := a.llmClient.Stream(ctx, messages, opts...)
 	if err != nil {
 		return nil, err
@@ -151,17 +178,29 @@ func (a *Agent) generateThinkResponse(
 
 		chunks = append(chunks, chunk)
 		if delta := assistantText(chunk); delta != "" {
-			if err := streamingFunc(ctx, []byte(delta)); err != nil {
+			if err := events.WriteWithContext(ctx, common.AssistantTextDeltaEvent{Delta: delta}); err != nil {
 				return nil, err
 			}
 		}
 	}
 
 	if len(chunks) == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("model stream returned no messages")
 	}
+	message, err := schema.ConcatAgenticMessages(chunks)
+	if err != nil {
+		return nil, fmt.Errorf("concatenate model stream: %w", err)
+	}
+	return message, nil
+}
 
-	return schema.ConcatAgenticMessages(chunks)
+func normalizedCompressionStrategy(strategy common.CompressionStrategy) common.CompressionStrategy {
+	switch strategy {
+	case common.CompressionStrategyPrecise, common.CompressionStrategyDiscardHalf:
+		return strategy
+	default:
+		return common.CompressionStrategyAggressive
+	}
 }
 
 func assistantMessageFromResponse(resp *schema.AgenticMessage) *schema.AgenticMessage {

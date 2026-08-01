@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/schema"
@@ -87,7 +86,7 @@ func TestAgentContextMetadataAndInterrupt(t *testing.T) {
 	}
 }
 
-func TestUsageAndStep(t *testing.T) {
+func TestUsage(t *testing.T) {
 	if NewAgentUsage(0, 0, 0) != nil || (*AgentUsage)(nil).Clone() != nil {
 		t.Fatal("zero or nil usage should return nil")
 	}
@@ -99,34 +98,6 @@ func TestUsageAndStep(t *testing.T) {
 	}
 	usage.Add(nil)
 	(*AgentUsage)(nil).Add(usage)
-
-	step := &Step{Thought: "consider", Action: "answer"}
-	step.AddUsage(1, 0, 1)
-	step.AddModelUsage(2, 1, 3)
-	step.AddCallbackUsage(4, 0, 5)
-	if !reflect.DeepEqual(step.Usage, &AgentUsage{PromptTokens: 7, CachedTokens: 1, CompletionTokens: 9}) {
-		t.Fatalf("total usage = %+v", step.Usage)
-	}
-	var nilStep *Step
-	nilStep.AddUsage(1, 1, 1)
-	nilStep.AddModelUsage(1, 1, 1)
-	nilStep.AddCallbackUsage(1, 1, 1)
-
-	encoded, err := step.ToString()
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoded, err := NewStepFromString(encoded)
-	if err != nil || decoded.Thought != step.Thought || decoded.Action != step.Action {
-		t.Fatalf("decoded step = %+v, %v", decoded, err)
-	}
-	if _, err := NewStepFromString("not json"); err == nil {
-		t.Fatal("invalid step unexpectedly decoded")
-	}
-	prompt, err := step.ToPrompt()
-	if err != nil || prompt.Role != schema.AgenticRoleTypeAssistant || !strings.Contains(prompt.ContentBlocks[0].AssistantGenText.Text, "consider") {
-		t.Fatalf("ToPrompt() = %+v, %v", prompt, err)
-	}
 }
 
 func TestNamesSkillsAndResults(t *testing.T) {

@@ -17,27 +17,34 @@ import (
 )
 
 type skillCaptureModel struct {
-	mu     sync.Mutex
-	inputs [][]*schema.AgenticMessage
+	mu        sync.Mutex
+	inputs    [][]*schema.AgenticMessage
+	responses []*schema.AgenticMessage
+	calls     int
 }
 
 func (m *skillCaptureModel) Generate(
 	_ context.Context,
-	input []*schema.AgenticMessage,
+	_ []*schema.AgenticMessage,
 	_ ...model.Option,
 ) (*schema.AgenticMessage, error) {
-	m.mu.Lock()
-	m.inputs = append(m.inputs, common.CloneAgenticMessages(input))
-	m.mu.Unlock()
-	return common.AssistantTextMessage("done"), nil
+	return nil, errors.New("unexpected Generate call")
 }
 
 func (m *skillCaptureModel) Stream(
-	context.Context,
-	[]*schema.AgenticMessage,
-	...model.Option,
+	_ context.Context,
+	input []*schema.AgenticMessage,
+	_ ...model.Option,
 ) (*schema.StreamReader[*schema.AgenticMessage], error) {
-	return nil, errors.New("unexpected Stream call")
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.inputs = append(m.inputs, common.CloneAgenticMessages(input))
+	response := common.AssistantTextMessage("done")
+	if m.calls < len(m.responses) {
+		response = m.responses[m.calls]
+	}
+	m.calls++
+	return schema.StreamReaderFromArray([]*schema.AgenticMessage{response}), nil
 }
 
 func (m *skillCaptureModel) systemPrompt() string {
@@ -69,32 +76,39 @@ func TestDoUsesPerRunSkillsDirAndContextMeta(t *testing.T) {
 	writeTestSkill(t, skillsDir, "custom-skill", "custom skill marker")
 	writeTestSkill(t, skillsDir, "excluded-skill", "excluded skill marker")
 
-	llm := &skillCaptureModel{}
+	llm := &skillCaptureModel{responses: []*schema.AgenticMessage{
+		skillProbeToolCall("skills-probe-1"),
+		common.AssistantTextMessage("done"),
+	}}
 	agent := NewAgent(llm, 128, ram.NewRAMContextManager())
 	agent.AddSkills(ctx, "excluded-skill")
 
-	var callbackSkillsDir string
-	_, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	var toolSkillsDir string
+	agent.AddTool(ctx, common.NewDefaultTool(
+		"capture_skills_dir",
+		"Capture the configured skill root for a test.",
+		common.NewToolParameters(),
+		func(actx *common.AgentContext, _ map[string]any) common.ToolResult {
+			toolSkillsDir = common.SkillsDirFromContext(actx)
+			return common.NewDefaultToolResult("captured")
+		},
+	))
+	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "use the custom skill"},
 		SkillsDir: skillsDir,
 		ContextMeta: map[common.AgentDoMetaKey]any{
 			common.InternalToolSkillsDirMetaKey: "must-be-overridden",
 		},
-		Callbacks: &common.Callbacks{
-			BeforeToolExecution: func(actx *common.AgentContext, _ *common.Step) {
-				callbackSkillsDir = common.SkillsDirFromContext(actx)
-			},
-		},
 	})
 	if err != nil {
 		t.Fatalf("Do() error = %v", err)
 	}
-	steps := readAllSteps(t, ctx, stepStream)
-	if len(steps) != 1 || !steps[0].IsFinalAnswer {
-		t.Fatalf("steps = %+v, want one final step", steps)
+	events := readAllEvents(t, ctx, eventStream)
+	if got := len(eventsByType[common.FinalAnswerCompletedEvent](events)); got != 1 {
+		t.Fatalf("final answer event count = %d, want 1", got)
 	}
-	if callbackSkillsDir != skillsDir {
-		t.Errorf("callback skills dir = %q, want %q", callbackSkillsDir, skillsDir)
+	if toolSkillsDir != skillsDir {
+		t.Errorf("tool skills dir = %q, want %q", toolSkillsDir, skillsDir)
 	}
 	prompt := llm.systemPrompt()
 	if !strings.Contains(prompt, "custom skill marker") {
@@ -118,14 +132,14 @@ func TestDoReloadsSkillsFromEachRunDirectory(t *testing.T) {
 	agent := NewAgent(llm, 128, ram.NewRAMContextManager())
 	agent.AddSkills(ctx)
 	for _, skillsDir := range []string{firstDir, secondDir} {
-		_, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
+		_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 			UserInput: common.AgentUserInput{Text: "use skills"},
 			SkillsDir: skillsDir,
 		})
 		if err != nil {
 			t.Fatalf("Do(%q) error = %v", skillsDir, err)
 		}
-		_ = readAllSteps(t, ctx, stepStream)
+		_ = readAllEvents(t, ctx, eventStream)
 	}
 
 	prompts := llm.systemPrompts()
@@ -144,23 +158,43 @@ func TestDoDefaultsSkillsDir(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	llm := &skillCaptureModel{}
+	llm := &skillCaptureModel{responses: []*schema.AgenticMessage{
+		skillProbeToolCall("skills-probe-2"),
+		common.AssistantTextMessage("done"),
+	}}
 	agent := NewAgent(llm, 128, ram.NewRAMContextManager())
 	var got string
-	_, stepStream, err := agent.Do(ctx, &common.AgentDoArgs{
-		UserInput: common.AgentUserInput{Text: "hello"},
-		Callbacks: &common.Callbacks{
-			BeforeToolExecution: func(actx *common.AgentContext, _ *common.Step) {
-				got = common.SkillsDirFromContext(actx)
-			},
+	agent.AddTool(ctx, common.NewDefaultTool(
+		"capture_skills_dir",
+		"Capture the configured skill root for a test.",
+		common.NewToolParameters(),
+		func(actx *common.AgentContext, _ map[string]any) common.ToolResult {
+			got = common.SkillsDirFromContext(actx)
+			return common.NewDefaultToolResult("captured")
 		},
+	))
+	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+		UserInput: common.AgentUserInput{Text: "hello"},
 	})
 	if err != nil {
 		t.Fatalf("Do() error = %v", err)
 	}
-	_ = readAllSteps(t, ctx, stepStream)
+	_ = readAllEvents(t, ctx, eventStream)
 	if got != common.SkillDefaultFolder {
 		t.Errorf("skills dir = %q, want %q", got, common.SkillDefaultFolder)
+	}
+}
+
+func skillProbeToolCall(callID string) *schema.AgenticMessage {
+	return &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.FunctionToolCall{
+				CallID:    callID,
+				Name:      "capture_skills_dir",
+				Arguments: `{}`,
+			}),
+		},
 	}
 }
 

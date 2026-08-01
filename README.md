@@ -29,7 +29,7 @@
 - **Context compression** — compact long tool histories with precise, aggressive, or no-model discard strategies.
 - **Extensible tools** — register Go functions, MCP tools, Go shared libraries, or gRPC plugins.
 - **Planning and skills** — expose built-in planning tools and load skills on demand from a `skills/` directory.
-- **Streaming execution** — consume typed tool and final-answer steps, token usage, callbacks, and final-answer webhooks.
+- **Streaming execution** — consume typed model, tool, steering, final-answer, and terminal events with aggregate token usage and final-answer webhooks.
 - **Multimodal input and output** — pass image URLs, Base64 data, or binary images through supported models and tools.
 - **Milvus retrieval** — use dense vector, BM25, or hybrid retrieval with filters, partitions, and JSON fields.
 - **Reusable primitives** — multi-provider embeddings, a fluent prompt builder, and concurrent generic streams.
@@ -152,7 +152,7 @@ Go plugins are built natively and supported on Linux, macOS, and FreeBSD. See th
 | --- | --- |
 | [`goatc`](goatc) | YAML-driven Agent compiler with Go plugin, gRPC, and MCP tool providers plus a Bubble Tea interface. |
 | [`agent/react`](agent/react) | Asynchronous native function-calling agent runtime. |
-| [`agent/common`](agent/common) | Agent, tool, step, callback, and multimodal contracts. |
+| [`agent/common`](agent/common) | Agent, tool, event, usage, and multimodal contracts. |
 | [`agent/contextmgr`](agent/contextmgr) | Context manager interface plus RAM, file, SQLite, and MySQL backends. |
 | [`agent/tools`](agent/tools) | Planning, skills, terminal, and shell tools. |
 | [`agent/toolplugin`](agent/toolplugin) | Go shared-library and gRPC tool plugins. |
@@ -171,7 +171,7 @@ flowchart LR
     Agent --> Model[Eino AgenticModel]
     Agent --> Tools[Go · MCP · gRPC · shared-library tools]
     Agent --> ContextManager[RAM · files · SQLite · MySQL]
-    Agent --> Steps[Typed step stream]
+    Agent --> Events[Typed event stream]
     SDK --> Retriever[Retriever]
     Retriever --> Milvus[(Milvus)]
     Retriever --> Embedder[Embedder]
@@ -254,7 +254,7 @@ func main() {
 	// 128 means an approximately 128K-token model context window.
 	agent := react.NewAgent(llm, 128, ram.NewRAMContextManager())
 
-	contextUID, steps, err := agent.Do(ctx, &common.AgentDoArgs{
+	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{
 			Text: "Explain why typed streams are useful in Go in three bullets.",
 		},
@@ -264,22 +264,38 @@ func main() {
 		log.Fatal(err)
 	}
 
+	var usage *common.AgentUsage
 	for {
-		step, err := steps.ReadWithContext(ctx)
-		switch {
-		case errors.Is(err, streaming.ErrStreamClosed):
-			fmt.Printf("\nConversation: %s\n", contextUID)
-			return
-		case err != nil:
+		event, err := eventStream.ReadWithContext(ctx)
+		if errors.Is(err, streaming.ErrStreamClosed) {
+			break
+		}
+		if err != nil {
 			log.Fatal(err)
-		case step.IsFinalAnswer:
-			fmt.Println(step.Observation)
+		}
+
+		switch event := event.(type) {
+		case common.AssistantTextDeltaEvent:
+			fmt.Print(event.Delta)
+		case common.RunCompletedEvent:
+			usage = event.Usage
+		case common.RunFailedEvent:
+			log.Fatalf("agent failed during %s: %s", event.Operation, event.Error)
+		case common.RunCanceledEvent:
+			log.Fatalf("agent canceled: %s", event.Reason)
 		}
 	}
+
+	if usage == nil {
+		usage = &common.AgentUsage{}
+	}
+	fmt.Printf("\nConversation: %s\n", contextUID)
+	fmt.Printf("Tokens: prompt=%d cached=%d completion=%d\n",
+		usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 }
 ```
 
-`Agent.Do` stores the user message, starts the agent loop in the background, and immediately returns a `ContextUID` plus a stream for that run. Consume the stream until `streaming.ErrStreamClosed` before starting another turn with the same `ContextUID`.
+`Agent.Do` stores the user message, starts the agent loop in the background, and immediately returns a `ContextUID` plus a `common.AgentEvent` stream for that run. Stream items are concrete event values, so consumers handle them directly with a type switch. Drain the stream through its single terminal event and `streaming.ErrStreamClosed` before starting another turn with the same `ContextUID`.
 
 While the run is active, queue additional user messages with `Steer`:
 
@@ -328,7 +344,7 @@ Use `ToolProperty.Items` and `ToolProperty.Properties` for array and nested-obje
 ### Enable planning, compression, and parallel tools
 
 ```go
-_, planningSteps, err := agent.Do(ctx, &common.AgentDoArgs{
+	_, planningEvents, err := agent.Do(ctx, &common.AgentDoArgs{
 	UserInput:      common.AgentUserInput{Text: "Analyze this project and propose a refactor."},
 	MaxStep:        12,
 	EnablePlanning: true,
@@ -344,7 +360,7 @@ _, planningSteps, err := agent.Do(ctx, &common.AgentDoArgs{
 })
 ```
 
-Consume `planningSteps` in the same way as the quick-start stream; the run is complete when the stream closes.
+Consume `planningEvents` in the same way as the quick-start stream; the run is complete when its terminal event arrives and the stream closes.
 
 ## Conversation context management
 
@@ -386,7 +402,7 @@ Retrievers support scalar and JSON-path filters, custom JSON fields and indexes,
 - `agenticclaude` for Claude.
 - `agenticgemini` for Gemini and Vertex AI.
 
-See the [Agent SDK guide](agent/README.md) for provider setup, MCP registration, skills, multimodal messages, callbacks, webhooks, and plugin loading.
+See the [Agent SDK guide](agent/README.md) for provider setup, runtime events, MCP registration, skills, multimodal messages, webhooks, and plugin loading.
 
 ## Documentation
 

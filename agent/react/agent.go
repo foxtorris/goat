@@ -2,6 +2,7 @@ package react
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
@@ -375,50 +377,69 @@ func commitConversationFinal(
 	return nil
 }
 
-func optimizationAdviceMessages(steps ...*common.Step) []*schema.AgenticMessage {
-	messages := make([]*schema.AgenticMessage, 0, len(steps))
-	seen := make(map[string]struct{}, len(steps))
-	for _, step := range steps {
-		if step == nil || step.IsFinalAnswer || step.OptimizationAdvice == nil {
-			continue
-		}
-
-		advice := strings.TrimSpace(*step.OptimizationAdvice)
-		if advice == "" {
-			continue
-		}
-		if _, ok := seen[advice]; ok {
-			continue
-		}
-		seen[advice] = struct{}{}
-
-		messages = append(messages, schema.UserAgenticMessage(advice))
-	}
-
-	return messages
-}
-
-func applyUsageToStep(step *common.Step, promptTokens, cachedTokens, completionTokens int) {
-	if step == nil {
-		return
-	}
-	step.AddModelUsage(promptTokens, cachedTokens, completionTokens)
-}
-
-func responseMetaFromUsage(promptTokens, cachedTokens, completionTokens int) *schema.AgenticResponseMeta {
-	if promptTokens == 0 && cachedTokens == 0 && completionTokens == 0 {
+func responseMetaFromUsage(usage *common.AgentUsage) *schema.AgenticResponseMeta {
+	if usage == nil {
 		return nil
 	}
 	return &schema.AgenticResponseMeta{
 		TokenUsage: &schema.TokenUsage{
-			PromptTokens:     promptTokens,
-			CompletionTokens: completionTokens,
-			TotalTokens:      promptTokens + completionTokens,
+			PromptTokens:     usage.PromptTokens,
+			CompletionTokens: usage.CompletionTokens,
+			TotalTokens:      usage.PromptTokens + usage.CompletionTokens,
 			PromptTokenDetails: schema.PromptTokenDetails{
-				CachedTokens: cachedTokens,
+				CachedTokens: usage.CachedTokens,
 			},
 		},
 	}
+}
+
+func addRunUsage(total *common.AgentUsage, usage *common.AgentUsage) {
+	if total != nil {
+		total.Add(usage)
+	}
+}
+
+func snapshotRunUsage(total *common.AgentUsage) *common.AgentUsage {
+	if total == nil {
+		return nil
+	}
+	return common.NewAgentUsage(total.PromptTokens, total.CachedTokens, total.CompletionTokens)
+}
+
+func cloneToolArguments(arguments map[string]any) map[string]any {
+	if arguments == nil {
+		return map[string]any{}
+	}
+	data, err := sonic.Marshal(arguments)
+	if err == nil {
+		var clone map[string]any
+		if err := sonic.Unmarshal(data, &clone); err == nil && clone != nil {
+			return clone
+		}
+	}
+	return maps.Clone(arguments)
+}
+
+var errAgentLoopInterrupted = errors.New("agent loop interrupted")
+
+type runOperationError struct {
+	operation string
+	err       error
+}
+
+func (e *runOperationError) Error() string {
+	return fmt.Sprintf("%s: %v", e.operation, e.err)
+}
+
+func (e *runOperationError) Unwrap() error {
+	return e.err
+}
+
+func operationError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &runOperationError{operation: operation, err: err}
 }
 
 func cloneAgentDoArgs(args *common.AgentDoArgs) *common.AgentDoArgs {
@@ -435,10 +456,6 @@ func cloneAgentDoArgs(args *common.AgentDoArgs) *common.AgentDoArgs {
 		for k, v := range args.ContextMeta {
 			clone.ContextMeta[k] = v
 		}
-	}
-	if args.Callbacks != nil {
-		callbacks := *args.Callbacks
-		clone.Callbacks = &callbacks
 	}
 	if args.ToolExecutionOptions != nil {
 		options := *args.ToolExecutionOptions
@@ -487,7 +504,7 @@ func (a *Agent) Do(
 	ctx context.Context,
 	args *common.AgentDoArgs,
 	opts ...model.Option,
-) (common.ContextUID, streaming.Stream[*common.Step], error) {
+) (common.ContextUID, streaming.Stream[common.AgentEvent], error) {
 	args = cloneAgentDoArgs(args)
 	if args == nil {
 		return "", nil, fmt.Errorf("agent do args is nil")
@@ -588,55 +605,43 @@ func (a *Agent) Do(
 		return "", nil, fmt.Errorf("failed to store user message: %w", err)
 	}
 
-	stepsUsed := 0
-
-	// Convert tools to Eino agentic model format.
 	callOpts := append([]model.Option{}, opts...)
 	agenticTools := a.convertToolsToAgenticFormat(args.EnablePlanning)
 	if len(agenticTools) > 0 {
 		callOpts = append(callOpts, model.WithTools(agenticTools))
 	}
 
-	stepStream := streaming.NewStream[*common.Step](8)
-	emitStep := func(step *common.Step) error {
-		if step == nil {
-			return nil
-		}
-		return stepStream.WriteWithContext(actx, step)
+	eventStream := streaming.NewStream[common.AgentEvent](64)
+	if err := eventStream.WriteWithContext(ctx, common.RunStartedEvent{MaxStep: maxStep}); err != nil {
+		_ = eventStream.Close()
+		return "", nil, fmt.Errorf("write run started event: %w", err)
 	}
+	if len(appliedBeforeRun) > 0 {
+		if err := eventStream.WriteWithContext(ctx, common.SteeringAppliedEvent{Count: len(appliedBeforeRun)}); err != nil {
+			_ = eventStream.Close()
+			return "", nil, fmt.Errorf("write steering applied event: %w", err)
+		}
+	}
+
+	iterationsUsed := 0
+	toolCallsUsed := 0
+	runUsage := &common.AgentUsage{}
 
 	runLoop := func() error {
 		writeFinal := func() error {
-			finalAnswer, promptTokens, completionTokens, cachedTokens := a.generateFinalAnswer(
+			finalAnswer, usage, err := a.generateFinalAnswer(
 				actx,
 				messages,
 				args.SpecialRequirements,
-				args.FinalAnswerStreamingFunc,
+				eventStream,
 				callOpts...,
 			)
-			// Create Step for callbacks (not persisted in the conversation context).
-			finalStep := &common.Step{
-				Thought:          "Now I know the answer.",
-				Action:           "Output the final answer in observation field.",
-				UseToolOrNot:     false,
-				ActionInputParam: nil,
-				IsFinalAnswer:    true,
+			if err != nil {
+				return operationError("generate final answer", err)
 			}
-			applyUsageToStep(finalStep, promptTokens, cachedTokens, completionTokens)
-
-			if args.Callbacks != nil && args.Callbacks.BeforeToolExecution != nil {
-				args.Callbacks.BeforeToolExecution(actx, finalStep)
-			}
-
-			finalStep.Observation = finalAnswer
-
-			if args.Callbacks != nil && args.Callbacks.AfterToolExecution != nil {
-				args.Callbacks.AfterToolExecution(actx, finalStep)
-			}
-
-			finalAnswer = finalStep.Observation
+			addRunUsage(runUsage, usage)
 			finalMessage := common.AssistantTextMessage(finalAnswer)
-			finalMessage.ResponseMeta = responseMetaFromUsage(promptTokens, cachedTokens, completionTokens)
+			finalMessage.ResponseMeta = responseMetaFromUsage(usage)
 			if err := commitConversationFinal(
 				actx,
 				a.contextManager,
@@ -644,13 +649,12 @@ func (a *Agent) Do(
 				&messages,
 				finalMessage,
 			); err != nil {
-				logging.Errorf("Agent.Do: failed to commit final answer: %v", err)
-				return err
+				return operationError("commit final answer", err)
 			}
 
-			stepsUsed++
-			if err := emitStep(finalStep); err != nil {
-				return fmt.Errorf("failed to stream final step: %w", err)
+			iterationsUsed++
+			if err := eventStream.WriteWithContext(actx, common.FinalAnswerCompletedEvent{Answer: finalAnswer}); err != nil {
+				return operationError("write final answer event", err)
 			}
 
 			a.sendFinalAnswerWebhook(
@@ -663,7 +667,6 @@ func (a *Agent) Do(
 		}
 
 		for {
-			// Check if context is canceled
 			select {
 			case <-actx.Done():
 				logging.Infof("Agent.Do: context canceled, stopping agent")
@@ -671,46 +674,35 @@ func (a *Agent) Do(
 			default:
 			}
 
-			// Reach the max step, generate the final answer, and discard any
-			// steering messages that were still pending at the final boundary.
-			if stepsUsed >= maxStep {
+			if iterationsUsed >= maxStep {
 				if err := writeFinal(); err != nil {
 					return err
 				}
 				return nil
 			}
 
-			// Use Think function: think first, then check if compression is needed
-			thinkResult, err := a.Think(actx, &ThinkArgs{
-				UserInput:                args.UserInput,
-				SpecialRequirements:      args.SpecialRequirements,
-				Compress:                 args.Compress,
-				CompressionOptions:       args.CompressionOptions,
-				Messages:                 messages,
-				SystemPrompt:             systemPrompt,
-				FinalAnswerStreamingFunc: args.FinalAnswerStreamingFunc,
-			}, callOpts...)
+			thinkResult, err := a.think(actx, &thinkArgs{
+				Compress:           args.Compress,
+				CompressionOptions: args.CompressionOptions,
+				Messages:           messages,
+			}, eventStream, callOpts...)
 			if err != nil {
-				logging.Errorf("Agent.Do: Think error: %v", err)
-				return err
+				return operationError("think", err)
 			}
+			addRunUsage(runUsage, thinkResult.ModelUsage)
+			addRunUsage(runUsage, thinkResult.CompressionUsage)
 
-			// If compression happened during Think, update our state
 			if thinkResult.IsCompressed {
 				if len(thinkResult.CompressedMessages) > 0 {
 					messages = thinkResult.CompressedMessages
-					a.contextManager.Reset(ctx, contextUID, messages)
+					a.contextManager.Reset(actx, contextUID, messages)
 				}
 			}
 
-			// Get the raw response from Think result
 			raw := thinkResult.RawResponse
-
-			// Extract reasoning content if available
 			reasoningContent := messageReasoning(raw)
 			toolCalls := functionToolCalls(raw)
 
-			// Check if context is canceled after LLM call
 			select {
 			case <-actx.Done():
 				logging.Infof("Agent.Do: context canceled after LLM call, stopping agent")
@@ -718,13 +710,70 @@ func (a *Agent) Do(
 			default:
 			}
 
-			// Check if model wants to call tools
 			if len(toolCalls) > 0 {
 				assistantMessage := assistantMessageFromResponse(raw)
 
 				toolResults := make([]*schema.FunctionToolResult, len(toolCalls))
-				toolSteps := make([]*common.Step, len(toolCalls))
-				mu := &sync.Mutex{}
+				type preparedToolCall struct {
+					call      *schema.FunctionToolCall
+					tool      common.Tool
+					arguments map[string]any
+					execute   bool
+				}
+				prepared := make([]preparedToolCall, len(toolCalls))
+
+				for i, toolCall := range toolCalls {
+					if toolCall == nil {
+						continue
+					}
+					toolCallsUsed++
+					item := preparedToolCall{
+						call:      toolCall,
+						tool:      a.toolsMap[toolCall.Name],
+						arguments: map[string]any{},
+					}
+					var failureStage common.ToolCallFailureStage
+					var failureMessage string
+					if item.tool == nil {
+						failureStage = common.ToolCallFailureStageLookup
+						failureMessage = "Tool not found: " + toolCall.Name
+					} else if err := sonic.UnmarshalString(toolCall.Arguments, &item.arguments); err != nil {
+						failureStage = common.ToolCallFailureStageArguments
+						failureMessage = "Failed to parse arguments: " + err.Error()
+						item.arguments = map[string]any{}
+					} else {
+						if item.arguments == nil {
+							item.arguments = map[string]any{}
+						}
+						item.execute = true
+					}
+					prepared[i] = item
+
+					if err := eventStream.WriteWithContext(actx, common.ToolCallRequestedEvent{
+						CallID:    toolCall.CallID,
+						Name:      toolCall.Name,
+						Arguments: cloneToolArguments(item.arguments),
+					}); err != nil {
+						return operationError("write tool requested event", err)
+					}
+
+					if !item.execute {
+						observation := "Error: " + failureMessage
+						toolResults[i] = &schema.FunctionToolResult{
+							CallID:  toolCall.CallID,
+							Name:    toolCall.Name,
+							Content: toolResultContentBlocks(observation, nil),
+						}
+						if err := eventStream.WriteWithContext(actx, common.ToolCallFailedEvent{
+							CallID: toolCall.CallID,
+							Name:   toolCall.Name,
+							Stage:  failureStage,
+							Error:  failureMessage,
+						}); err != nil {
+							return operationError("write tool failure event", err)
+						}
+					}
+				}
 
 				concurr := 1
 				if args.ToolExecutionOptions != nil &&
@@ -736,95 +785,85 @@ func (a *Agent) Do(
 					}
 				}
 				p := pond.NewPool(concurr, pond.WithQueueSize(len(toolCalls)))
+				var batchErr error
+				var batchErrMu sync.Mutex
+				recordBatchError := func(err error) {
+					if err == nil {
+						return
+					}
+					batchErrMu.Lock()
+					if batchErr == nil {
+						batchErr = err
+					}
+					batchErrMu.Unlock()
+				}
 
-				for i, tc := range toolCalls {
+				for i := range prepared {
+					if !prepared[i].execute {
+						continue
+					}
 					index := i
 					f := func() {
-						if tc == nil {
+						item := prepared[index]
+						if err := eventStream.WriteWithContext(actx, common.ToolCallStartedEvent{
+							CallID:    item.call.CallID,
+							Name:      item.call.Name,
+							Arguments: cloneToolArguments(item.arguments),
+						}); err != nil {
+							recordBatchError(operationError("write tool started event", err))
 							return
 						}
-						toolName := tc.Name
-						tool := a.toolsMap[toolName]
 
-						var observation string
-						var actionInputParam map[string]any
-
-						shouldExecute := true
-						if tool == nil {
-							observation = "Error: Tool not found: " + toolName
-							actionInputParam = map[string]any{}
-							shouldExecute = false
-						} else {
-							var toolArgs map[string]any
-							if err := sonic.UnmarshalString(tc.Arguments, &toolArgs); err != nil {
-								logging.Errorf("Failed to parse tool arguments: %v", err)
-								observation = "Error: Failed to parse arguments: " + err.Error()
-								actionInputParam = map[string]any{}
-								shouldExecute = false
-							} else {
-								actionInputParam = toolArgs
+						startedAt := time.Now()
+						result := item.tool.Execute(actx, item.arguments)
+						if result == nil {
+							message := "tool returned a nil result"
+							toolResults[index] = &schema.FunctionToolResult{
+								CallID:  item.call.CallID,
+								Name:    item.call.Name,
+								Content: toolResultContentBlocks("Error: "+message, nil),
 							}
+							if err := eventStream.WriteWithContext(actx, common.ToolCallFailedEvent{
+								CallID: item.call.CallID,
+								Name:   item.call.Name,
+								Stage:  common.ToolCallFailureStageExecution,
+								Error:  message,
+							}); err != nil {
+								recordBatchError(operationError("write tool failure event", err))
+							}
+							return
 						}
 
-						thought := "I need to use the " + toolName + " tool to help with this task."
-						if reasoningContent != "" {
-							thought = reasoningContent
-						}
-
-						// Create Step for callbacks (not persisted in the conversation context).
-						newStep := &common.Step{
-							Thought:          thought,
-							Action:           "Call tool: " + toolName,
-							UseToolOrNot:     true,
-							ToolName:         toolName,
-							ActionInputParam: actionInputParam,
-							IsFinalAnswer:    false,
-						}
-						// One model response can request multiple tool calls, but its
-						// usage belongs to the whole batch. Attach it once so callbacks
-						// that aggregate Step.Usage do not double count it.
-						if index == 0 {
-							applyUsageToStep(newStep, thinkResult.PromptTokens, thinkResult.CachedTokens, thinkResult.CompletionTokens)
-						}
-
-						if args.Callbacks != nil && args.Callbacks.BeforeToolExecution != nil {
-							args.Callbacks.BeforeToolExecution(actx, newStep)
-						}
-
-						if tool != nil && shouldExecute {
-							result := tool.Execute(actx, actionInputParam)
-							observation = result.String()
-							newStep.ObservationImages = result.ImageParts()
-						}
-
-						newStep.Observation = observation
-
-						if args.Callbacks != nil && args.Callbacks.AfterToolExecution != nil {
-							args.Callbacks.AfterToolExecution(actx, newStep)
-						}
-
-						// append the results
-						mu.Lock()
-						toolSteps[index] = newStep
-
+						observation := result.String()
+						images := append([]*schema.ContentBlock(nil), result.ImageParts()...)
 						toolResults[index] = &schema.FunctionToolResult{
-							CallID:  tc.CallID,
-							Name:    toolName,
-							Content: toolResultContentBlocks(newStep.Observation, newStep.ObservationImages),
+							CallID:  item.call.CallID,
+							Name:    item.call.Name,
+							Content: toolResultContentBlocks(observation, images),
 						}
-						mu.Unlock()
+						if err := eventStream.WriteWithContext(actx, common.ToolCallCompletedEvent{
+							CallID:   item.call.CallID,
+							Name:     item.call.Name,
+							Result:   observation,
+							Images:   append([]*schema.ContentBlock(nil), images...),
+							Duration: time.Since(startedAt),
+						}); err != nil {
+							recordBatchError(operationError("write tool completed event", err))
+						}
 					}
 
 					p.Submit(f)
 				}
 
 				p.StopAndWait()
+				batchErrMu.Lock()
+				err = batchErr
+				batchErrMu.Unlock()
+				if err != nil {
+					return err
+				}
 
-				// Commit the complete tool-call batch only after all PPOF hooks have
-				// settled, so the managed context never contains an incomplete step.
 				pendingMessages := []*schema.AgenticMessage{assistantMessage}
-
-				// Add tool results to conversation
 				for _, tr := range toolResults {
 					if tr == nil {
 						continue
@@ -832,7 +871,6 @@ func (a *Agent) Do(
 					pendingMessages = append(pendingMessages, common.FunctionToolResultMessage(tr))
 				}
 
-				pendingMessages = append(pendingMessages, optimizationAdviceMessages(toolSteps...)...)
 				appliedSteering, err := commitConversationTurn(
 					actx,
 					a.contextManager,
@@ -841,77 +879,39 @@ func (a *Agent) Do(
 					pendingMessages...,
 				)
 				if err != nil {
-					return fmt.Errorf("failed to commit tool turn: %w", err)
+					return operationError("commit tool turn", err)
 				}
+				iterationsUsed++
 				if len(appliedSteering) > 0 {
 					logging.Infof(
 						"Agent.Do: applied %d steering messages after tool turn in conversation %s",
 						len(appliedSteering),
 						contextUID,
 					)
-				}
-
-				// Count the whole assistant tool-call batch as a single quota step,
-				// even when the model requested multiple tool executions at once.
-				stepsUsed++
-
-				// Stream completed tool executions in the same order as the model's
-				// tool calls, regardless of parallel execution completion order.
-				for _, step := range toolSteps {
-					if err := emitStep(step); err != nil {
-						return fmt.Errorf("failed to stream tool step: %w", err)
+					if err := eventStream.WriteWithContext(actx, common.SteeringAppliedEvent{
+						Count: len(appliedSteering),
+					}); err != nil {
+						return operationError("write steering applied event", err)
 					}
 				}
 
 				if common.ConsumeInterruptSignal(actx) {
 					logging.Infof("Agent.Do: interrupt signal received, stopping agent loop for conversation %s", contextUID)
-					return nil
+					return errAgentLoopInterrupted
 				}
 
-				if stepsUsed >= maxStep {
+				if iterationsUsed >= maxStep {
 					if err := writeFinal(); err != nil {
 						return err
 					}
 					return nil
 				}
 
-				// Continue the loop to let model process tool results
 				continue
 			}
 
-			// Model returned a final answer (no tool calls)
-			// Use reasoning content as thought if available
-			thought := "Based on the conversation, I can now provide a final answer."
-			if reasoningContent != "" {
-				thought = reasoningContent
-			}
-
 			finalAnswer := assistantText(raw)
-			finalMessage := raw
-
-			// Create Step for callbacks (not persisted in the conversation context).
-			newStep := &common.Step{
-				Thought:          thought,
-				Action:           "Generate final answer based on context.",
-				UseToolOrNot:     false,
-				ToolName:         "",
-				ActionInputParam: nil,
-				IsFinalAnswer:    true,
-			}
-			applyUsageToStep(newStep, thinkResult.PromptTokens, thinkResult.CachedTokens, thinkResult.CompletionTokens)
-
-			if args.Callbacks != nil && args.Callbacks.BeforeToolExecution != nil {
-				args.Callbacks.BeforeToolExecution(actx, newStep)
-			}
-
-			newStep.Observation = finalAnswer
-
-			if args.Callbacks != nil && args.Callbacks.AfterToolExecution != nil {
-				args.Callbacks.AfterToolExecution(actx, newStep)
-			}
-
-			finalAnswer = newStep.Observation
-			finalMessage = common.AssistantTextMessage(finalAnswer)
+			finalMessage := common.AssistantTextMessage(finalAnswer)
 			finalMessage.ResponseMeta = raw.ResponseMeta
 			if reasoningContent != "" {
 				finalMessage.ContentBlocks = append([]*schema.ContentBlock{common.ReasoningBlock(reasoningContent)}, finalMessage.ContentBlocks...)
@@ -923,13 +923,12 @@ func (a *Agent) Do(
 				&messages,
 				finalMessage,
 			); err != nil {
-				logging.Errorf("Agent.Do: failed to commit final message: %v", err)
-				return err
+				return operationError("commit final answer", err)
 			}
 
-			stepsUsed++
-			if err := emitStep(newStep); err != nil {
-				return fmt.Errorf("failed to stream final step: %w", err)
+			iterationsUsed++
+			if err := eventStream.WriteWithContext(actx, common.FinalAnswerCompletedEvent{Answer: finalAnswer}); err != nil {
+				return operationError("write final answer event", err)
 			}
 
 			a.sendFinalAnswerWebhook(
@@ -938,17 +937,54 @@ func (a *Agent) Do(
 				a.buildFinalAnswerWebhookPayload(contextUID, args, finalAnswer),
 			)
 
-			// This is a final answer, exit
 			return nil
 		}
 	}
 
 	go func() {
-		defer stepStream.Close()
-		if err := runLoop(); err != nil {
+		defer eventStream.Close()
+		err := runLoop()
+		usage := snapshotRunUsage(runUsage)
+
+		var terminal common.AgentEvent
+		switch {
+		case err == nil:
+			terminal = common.RunCompletedEvent{
+				Usage:          usage,
+				IterationsUsed: iterationsUsed,
+				ToolCalls:      toolCallsUsed,
+			}
+		case errors.Is(err, errAgentLoopInterrupted):
+			terminal = common.RunInterruptedEvent{
+				Usage:          usage,
+				IterationsUsed: iterationsUsed,
+				Reason:         "tool requested loop interruption",
+			}
+		case actx.Err() != nil:
+			terminal = common.RunCanceledEvent{
+				Usage:          usage,
+				IterationsUsed: iterationsUsed,
+				Reason:         actx.Err().Error(),
+			}
+		default:
+			operation := "agent run"
+			var operationErr *runOperationError
+			if errors.As(err, &operationErr) {
+				operation = operationErr.operation
+			}
+			terminal = common.RunFailedEvent{
+				Usage:          usage,
+				IterationsUsed: iterationsUsed,
+				Operation:      operation,
+				Error:          err.Error(),
+			}
 			logging.Errorf("Agent.Do: background run error for conversation %s: %v", contextUID, err)
+		}
+
+		if writeErr := eventStream.WriteWithTimeout(terminal, time.Second); writeErr != nil {
+			logging.Errorf("Agent.Do: failed to write terminal event for conversation %s: %v", contextUID, writeErr)
 		}
 	}()
 
-	return contextUID, stepStream, nil
+	return contextUID, eventStream, nil
 }

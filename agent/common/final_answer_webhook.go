@@ -14,6 +14,5 @@ type FinalAnswerWebhookPayload struct {
 	ContextUID  ContextUID `json:"context_uid"`
 	UserInput   string     `json:"user_input"`
 	FinalAnswer string     `json:"final_answer"`
-	Steps       []*Step    `json:"steps,omitempty"`
 	GeneratedAt time.Time  `json:"generated_at"`
 }

@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `common.Agent.Do` now returns `streaming.Stream[common.AgentEvent]` while preserving its existing method shape. Concrete lifecycle, model, compression, tool, steering, final-answer, and terminal events replace the former `common.Step` stream.
+- Model thinking and final-answer generation now stream text through `AssistantTextDeltaEvent`; terminal events expose aggregate run usage and asynchronous failure, cancellation, or interruption state.
+- Parallel tool completion events now arrive in actual completion order while tool results passed back to the model retain request order.
+
+### Removed
+
+- Removed `common.Step`, execution callbacks, `OptimizationAdvice`, and `AgentDoArgs.FinalAnswerStreamingFunc`. Event consumers observe execution directly through the stream returned by `Do`.
+- Removed the unused `steps` field from final-answer webhook payloads.
+
 ## [0.2.0] - 2026-07-31
 
 ### Added

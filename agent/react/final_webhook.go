@@ -23,7 +23,6 @@ func (a *Agent) buildFinalAnswerWebhookPayload(
 		ContextUID:  contextUID,
 		UserInput:   args.UserInput.Text,
 		FinalAnswer: finalAnswer,
-		Steps:       nil, // Steps are no longer persisted in the conversation context.
 		GeneratedAt: time.Now().UTC(),
 	}
 }
