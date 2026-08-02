@@ -25,6 +25,7 @@
 - **Native tool calling** — execute one or more model-selected tools in an agent loop.
 - **Model agnostic** — use Eino adapters for OpenAI, Azure OpenAI, Claude, Gemini, or another compatible provider.
 - **Context management** — choose RAM, local files, SQLite, or MySQL and resume a conversation by `ContextUID`.
+- **Run-level forking** — branch a settled `RunSignature` into an independent conversation without replaying the model.
 - **Live steering** — queue one or more user messages while an agent runs and apply them at the next protocol-safe turn boundary.
 - **Context compression** — compact long tool histories with precise, aggressive, or no-model discard strategies.
 - **Extensible tools** — register Go functions, MCP tools, Go shared libraries, or gRPC plugins.
@@ -153,7 +154,7 @@ Go plugins are built natively and supported on Linux, macOS, and FreeBSD. See th
 | [`goatc`](goatc) | YAML-driven Agent compiler with Go plugin, gRPC, and MCP tool providers plus a Bubble Tea interface. |
 | [`agent/react`](agent/react) | Asynchronous native function-calling agent runtime. |
 | [`agent/common`](agent/common) | Agent, tool, event, usage, and multimodal contracts. |
-| [`agent/contextmgr`](agent/contextmgr) | Context manager interface plus RAM, file, SQLite, and MySQL backends. |
+| [`agent/contextmgr`](agent/contextmgr) | Conversation state machine, versioned Store contract, and RAM, file, SQLite, and MySQL backends. |
 | [`agent/tools`](agent/tools) | Planning, skills, terminal, and shell tools. |
 | [`agent/toolplugin`](agent/toolplugin) | Go shared-library and gRPC tool plugins. |
 | [`embedder`](embedder) | Embedding clients for OpenAI-compatible APIs, Gemini, Cohere, Voyage AI, and Ollama. |
@@ -170,7 +171,8 @@ flowchart LR
     SDK[Go SDK application] --> Agent
     Agent --> Model[Eino AgenticModel]
     Agent --> Tools[Go · MCP · gRPC · shared-library tools]
-    Agent --> ContextManager[RAM · files · SQLite · MySQL]
+    Agent --> Manager[Context Manager]
+    Manager --> Store[RAM · files · SQLite · MySQL]
     Agent --> Events[Typed event stream]
     SDK --> Retriever[Retriever]
     Retriever --> Milvus[(Milvus)]
@@ -312,6 +314,24 @@ err = agent.Steer(ctx, &common.AgentSteerArgs{
 
 The messages are queued in the context manager and applied after the next complete tool turn. A final answer always wins and discards messages that are still pending at that boundary. After final commit, `Steer` returns `contextmgr.ErrConversationFinalized`; the next `Do` user input reopens steering.
 
+After the stream reaches its terminal event and closes, fork the conversation at that run:
+
+```go
+forkedContextUID, err := agent.Fork(ctx, &common.AgentForkArgs{
+	From: signature,
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+branchSignature, branchEvents, err := agent.Do(ctx, &common.AgentDoArgs{
+	ContextUID: forkedContextUID,
+	UserInput:  common.AgentUserInput{Text: "Explore a different approach."},
+})
+```
+
+`Fork` copies committed context through the selected run, including that run, and returns a new `ContextUID`. It does not call the model or create a `RunUID`; the next `Do` on the returned context does that. Pending steering messages are excluded, the source conversation remains unchanged, and inherited run snapshots allow the branch to be forked again at an earlier run.
+
 ### Add a custom tool
 
 Tools use JSON Schema parameters and return text or multimodal results:
@@ -365,7 +385,7 @@ Consume `planningEvents` in the same way as the quick-start stream; the run is c
 
 ## Conversation context management
 
-Pass a `contextmgr.ContextManager` implementation to `react.NewAgent`. Passing `nil` uses a `file.FileContextManager` rooted at `data/conversations`.
+Pass a `*contextmgr.Manager` to `react.NewAgent`. The standard constructors below assemble a Manager over the selected Store. Passing `nil` uses a file-backed Manager rooted at `data/conversations`.
 
 | Backend | Constructor | Best suited for |
 | --- | --- | --- |
@@ -384,6 +404,10 @@ _, nextSteps, err := agent.Do(ctx, &common.AgentDoArgs{
 ```
 
 Each explicit `Do` user message stores its `RunUID` in `AgenticMessage.Extra`. Use `common.SplitMessagesByRun` to partition retained context into legacy/global preamble messages and per-run segments without adding model-visible marker text.
+
+Every run is settled into an immutable context snapshot before its terminal event is emitted. `Agent.Fork` uses that snapshot, so later turns and later context compression cannot change an existing fork point. For completed runs, the final answer, pending-message cleanup, and snapshot are committed by one atomic `SettleRun`; interrupted, canceled, and failed runs retain pending steering for the next run. The snapshot reflects the retained context as the model saw it at the selected terminal boundary. If compression had already summarized or discarded detailed tool-process messages, forking does not reconstruct those raw messages. Runs without a snapshot return `contextmgr.ErrRunNotSettled`; a settlement persistence failure is reported as `RunFailedEvent` with operation `settle run`.
+
+State transitions live in `contextmgr.Manager`, not in storage backends. A custom backend implements only the versioned four-method `contextmgr.Store` contract: `Create`, `Load`, `CompareAndSwap`, and `Delete`. Manager retries revision conflicts and owns steering, turn commits, run settlement, and fork behavior, so every backend gets the same semantics. See the [Agent guide](agent/README.md#conversation-context-management) for the complete contract and migration notes.
 
 ## Retrieval
 

@@ -7,42 +7,42 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	"github.com/torrischen/goat/util"
-	"github.com/torrischen/goat/util/logging"
 
 	"github.com/bytedance/sonic"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 	gormsqlite "gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const defaultSQLitePath = "data/goat_context.sqlite"
 
-// SQLiteContextManager manages conversation context using local embedded SQLite through GORM.
-type SQLiteContextManager struct {
-	db      *gorm.DB
-	writeMu sync.Mutex
+// SQLiteStore persists a complete versioned context state in one SQLite row.
+type SQLiteStore struct {
+	db *gorm.DB
 }
 
-var _ contextmgr.ContextManager = (*SQLiteContextManager)(nil)
+var _ contextmgr.Store = (*SQLiteStore)(nil)
 
 type contextConversation struct {
-	ContextUID string `gorm:"column:context_uid;primaryKey;size:191"`
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ContextUID   string `gorm:"column:context_uid;primaryKey;size:191"`
+	Revision     uint64 `gorm:"column:revision;not null;default:1"`
+	StatePayload string `gorm:"column:state_payload;type:text"`
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 func (contextConversation) TableName() string {
 	return "goat_context_conversations"
 }
 
+// The following rows are retained only to migrate contexts written by the
+// pre-Store context manager and to clean them up on Delete.
 type contextMessage struct {
 	ID           uint64 `gorm:"primaryKey;autoIncrement"`
 	ContextUID   string `gorm:"column:context_uid;size:191;not null;index:idx_goat_context_messages_uid;uniqueIndex:idx_goat_context_uid_message_index,priority:1"`
@@ -66,9 +66,31 @@ func (pendingMessage) TableName() string {
 	return "goat_context_pending_messages"
 }
 
-// NewSQLiteContextManager creates a local SQLite-backed context manager and migrates its tables.
-// If dbPath is empty, data/goat_context.sqlite is used.
-func NewSQLiteContextManager(dbPath string) (*SQLiteContextManager, error) {
+type runSnapshot struct {
+	ID         uint64 `gorm:"primaryKey;autoIncrement"`
+	ContextUID string `gorm:"column:context_uid;size:191;not null;index:idx_goat_context_run_snapshots_uid;uniqueIndex:idx_goat_context_run_snapshot_key,priority:1"`
+	RunUID     string `gorm:"column:run_uid;size:191;not null;uniqueIndex:idx_goat_context_run_snapshot_key,priority:2"`
+	Payload    string `gorm:"column:payload;type:text;not null"`
+	CreatedAt  time.Time
+}
+
+func (runSnapshot) TableName() string {
+	return "goat_context_run_snapshots"
+}
+
+// NewSQLiteContextManager creates a Manager backed by SQLite. If dbPath is
+// empty, data/goat_context.sqlite is used.
+func NewSQLiteContextManager(dbPath string) (*contextmgr.Manager, error) {
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	return contextmgr.NewManager(store), nil
+}
+
+// NewSQLiteStore opens SQLite and migrates both the current state table and
+// legacy tables needed for transparent reads of existing conversations.
+func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	dsn, err := buildDSN(dbPath)
 	if err != nil {
 		return nil, err
@@ -78,22 +100,31 @@ func NewSQLiteContextManager(dbPath string) (*SQLiteContextManager, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	sqlDB, err := db.DB()
 	if err != nil {
 		return nil, err
 	}
+	// A single connection also keeps :memory: databases coherent.
 	sqlDB.SetMaxOpenConns(1)
 
 	if err := configureSQLite(db); err != nil {
 		return nil, err
 	}
-
-	if err := db.AutoMigrate(&contextConversation{}, &contextMessage{}, &pendingMessage{}); err != nil {
+	if err := db.AutoMigrate(
+		&contextConversation{},
+		&contextMessage{},
+		&pendingMessage{},
+		&runSnapshot{},
+	); err != nil {
+		return nil, err
+	}
+	if err := db.Model(&contextConversation{}).
+		Where("revision = ?", 0).
+		Update("revision", 1).Error; err != nil {
 		return nil, err
 	}
 
-	return &SQLiteContextManager{db: db}, nil
+	return &SQLiteStore{db: db}, nil
 }
 
 func buildDSN(dbPath string) (string, error) {
@@ -103,16 +134,14 @@ func buildDSN(dbPath string) (string, error) {
 	if strings.TrimSpace(dbPath) == "" {
 		return "", errors.New("sqlite context manager db path is required")
 	}
-
 	if shouldCreateParentDir(dbPath) {
 		dir := filepath.Dir(dbPath)
 		if dir != "." {
-			if err := os.MkdirAll(dir, 0755); err != nil {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return "", fmt.Errorf("create sqlite context manager directory: %w", err)
 			}
 		}
 	}
-
 	return dbPath, nil
 }
 
@@ -130,297 +159,99 @@ func configureSQLite(db *gorm.DB) error {
 	return db.Exec("PRAGMA journal_mode = WAL").Error
 }
 
-func (m *SQLiteContextManager) InitNew(ctx context.Context) common.ContextUID {
-	contextUID := m.NewContextUID(ctx)
-
-	if err := m.ensureConversation(ctx, contextUID); err != nil {
-		logging.Errorf("Failed to initialize sqlite conversation %s: %v", contextUID, err)
+func (s *SQLiteStore) Create(
+	ctx context.Context,
+	state *contextmgr.State,
+) (common.ContextUID, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-
-	return contextUID
-}
-
-func (m *SQLiteContextManager) NewContextUID(_ context.Context) common.ContextUID {
-	return common.ContextUID(uuid.NewString())
-}
-
-func (m *SQLiteContextManager) Append(ctx context.Context, contextUID common.ContextUID, message *schema.AgenticMessage) error {
-	payload, err := encodeMessage(message)
+	next := state.Clone()
+	next.Revision = 1
+	payload, err := encodeState(next)
 	if err != nil {
-		return err
+		return "", err
 	}
-
-	m.writeMu.Lock()
-	defer m.writeMu.Unlock()
-
-	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := ensureConversationTx(tx, contextUID); err != nil {
-			return err
-		}
-
-		return tx.Exec(
-			`INSERT INTO goat_context_messages (context_uid, message_index, payload, created_at)
-SELECT ?, COALESCE(MAX(message_index), -1) + 1, ?, ?
-FROM goat_context_messages
-WHERE context_uid = ?`,
-			contextUID.String(),
-			payload,
-			time.Now(),
-			contextUID.String(),
-		).Error
-	})
+	contextUID := common.ContextUID(uuid.NewString())
+	if err := s.db.WithContext(ctx).Create(&contextConversation{
+		ContextUID:   contextUID.String(),
+		Revision:     next.Revision,
+		StatePayload: payload,
+	}).Error; err != nil {
+		return "", err
+	}
+	return contextUID, nil
 }
 
-func (m *SQLiteContextManager) GetAll(ctx context.Context, contextUID common.ContextUID) []*schema.AgenticMessage {
-	var rows []contextMessage
-	if err := m.db.WithContext(ctx).
-		Where("context_uid = ?", contextUID.String()).
-		Order("message_index ASC").
-		Find(&rows).Error; err != nil {
-		logging.Errorf("Failed to load sqlite conversation %s: %v", contextUID, err)
-		return []*schema.AgenticMessage{}
-	}
-
-	messages := make([]*schema.AgenticMessage, 0, len(rows))
-	for _, row := range rows {
-		msg, err := decodeMessage(row.Payload)
-		if err != nil {
-			logging.Errorf("Failed to decode sqlite conversation %s message %d: %v", contextUID, row.MessageIndex, err)
-			continue
-		}
-		messages = append(messages, msg)
-	}
-
-	return common.CloneAgenticMessages(messages)
-}
-
-func (m *SQLiteContextManager) Len(ctx context.Context, contextUID common.ContextUID) int {
-	var count int64
-	if err := m.db.WithContext(ctx).
-		Model(&contextMessage{}).
-		Where("context_uid = ?", contextUID.String()).
-		Count(&count).Error; err != nil {
-		logging.Errorf("Failed to count sqlite conversation %s: %v", contextUID, err)
-		return 0
-	}
-
-	return int(count)
-}
-
-func (m *SQLiteContextManager) Reset(ctx context.Context, contextUID common.ContextUID, messages []*schema.AgenticMessage) {
-	rows := make([]contextMessage, 0, len(messages))
-	for i, message := range messages {
-		payload, err := encodeMessage(message)
-		if err != nil {
-			logging.Errorf("Failed to encode sqlite conversation %s message %d: %v", contextUID, i, err)
-			return
-		}
-		rows = append(rows, contextMessage{
-			ContextUID:   contextUID.String(),
-			MessageIndex: int64(i),
-			Payload:      payload,
-		})
-	}
-
-	m.writeMu.Lock()
-	defer m.writeMu.Unlock()
-
-	if err := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := ensureConversationTx(tx, contextUID); err != nil {
-			return err
-		}
-		if err := tx.Where("context_uid = ?", contextUID.String()).Delete(&contextMessage{}).Error; err != nil {
-			return err
-		}
-		if len(rows) == 0 {
-			return nil
-		}
-		return tx.Create(&rows).Error
-	}); err != nil {
-		logging.Errorf("Failed to reset sqlite conversation %s: %v", contextUID, err)
-	}
-}
-
-func (m *SQLiteContextManager) EnqueuePendingMessages(
+func (s *SQLiteStore) Load(
 	ctx context.Context,
 	contextUID common.ContextUID,
-	messages []*schema.AgenticMessage,
-) error {
-	if err := contextmgr.ValidatePendingMessages(messages); err != nil {
-		return err
+) (*contextmgr.State, error) {
+	var row contextConversation
+	err := s.db.WithContext(ctx).
+		Where("context_uid = ?", contextUID.String()).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, contextmgr.ErrContextNotFound
 	}
-
-	rows := make([]pendingMessage, 0, len(messages))
-	for _, message := range messages {
-		payload, err := encodeMessage(message)
-		if err != nil {
-			return err
-		}
-		rows = append(rows, pendingMessage{ContextUID: contextUID.String(), Payload: payload})
-	}
-
-	m.writeMu.Lock()
-	defer m.writeMu.Unlock()
-
-	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		exists, err := conversationExistsTx(tx, contextUID)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			return contextmgr.ErrContextNotFound
-		}
-		finalized, err := conversationFinalizedTx(tx, contextUID)
-		if err != nil {
-			return err
-		}
-		if finalized {
-			return contextmgr.ErrConversationFinalized
-		}
-		if len(rows) == 0 {
-			return nil
-		}
-		return tx.Create(&rows).Error
-	})
-}
-
-func (m *SQLiteContextManager) CommitTurn(
-	ctx context.Context,
-	contextUID common.ContextUID,
-	turnMessages []*schema.AgenticMessage,
-) (*contextmgr.TurnCommitResult, error) {
-	turnPayloads := make([]string, 0, len(turnMessages))
-	for _, message := range turnMessages {
-		payload, err := encodeMessage(message)
-		if err != nil {
-			return nil, err
-		}
-		turnPayloads = append(turnPayloads, payload)
-	}
-
-	m.writeMu.Lock()
-	defer m.writeMu.Unlock()
-
-	applied := make([]*schema.AgenticMessage, 0)
-	err := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		exists, err := conversationExistsTx(tx, contextUID)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			return contextmgr.ErrContextNotFound
-		}
-
-		var pendingRows []pendingMessage
-		if err := tx.Where("context_uid = ?", contextUID.String()).
-			Order("id ASC").
-			Find(&pendingRows).Error; err != nil {
-			return err
-		}
-
-		applied = make([]*schema.AgenticMessage, 0, len(pendingRows))
-		for _, row := range pendingRows {
-			message, err := decodeMessage(row.Payload)
-			if err != nil {
-				return err
-			}
-			applied = append(applied, message)
-		}
-
-		var nextIndex int64
-		if err := tx.Model(&contextMessage{}).
-			Where("context_uid = ?", contextUID.String()).
-			Select("COALESCE(MAX(message_index), -1) + 1").
-			Scan(&nextIndex).Error; err != nil {
-			return err
-		}
-
-		rows := make([]contextMessage, 0, len(turnPayloads)+len(pendingRows))
-		for _, payload := range turnPayloads {
-			rows = append(rows, contextMessage{
-				ContextUID:   contextUID.String(),
-				MessageIndex: nextIndex,
-				Payload:      payload,
-			})
-			nextIndex++
-		}
-		for _, row := range pendingRows {
-			rows = append(rows, contextMessage{
-				ContextUID:   contextUID.String(),
-				MessageIndex: nextIndex,
-				Payload:      row.Payload,
-			})
-			nextIndex++
-		}
-		if len(rows) > 0 {
-			if err := tx.Create(&rows).Error; err != nil {
-				return err
-			}
-		}
-		if len(pendingRows) > 0 {
-			if err := tx.Where("context_uid = ?", contextUID.String()).Delete(&pendingMessage{}).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 	if err != nil {
 		return nil, err
 	}
+	if row.StatePayload != "" {
+		state, err := decodeState(row.StatePayload)
+		if err != nil {
+			return nil, fmt.Errorf("decode context %s state: %w", contextUID, err)
+		}
+		state.Revision = row.Revision
+		return state.Clone(), nil
+	}
 
-	return &contextmgr.TurnCommitResult{
-		AppliedPendingMessages: common.CloneAgenticMessages(applied),
-	}, nil
+	state, err := loadLegacyState(s.db.WithContext(ctx), contextUID)
+	if err != nil {
+		return nil, err
+	}
+	state.Revision = row.Revision
+	return state.Clone(), nil
 }
 
-func (m *SQLiteContextManager) CommitFinal(
+func (s *SQLiteStore) CompareAndSwap(
 	ctx context.Context,
 	contextUID common.ContextUID,
-	message *schema.AgenticMessage,
+	expectedRevision uint64,
+	state *contextmgr.State,
 ) error {
-	if err := contextmgr.ValidateFinalMessage(message); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	payload, err := encodeMessage(message)
+	next := state.Clone()
+	next.Revision = expectedRevision + 1
+	payload, err := encodeState(next)
 	if err != nil {
 		return err
 	}
 
-	m.writeMu.Lock()
-	defer m.writeMu.Unlock()
-
-	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		exists, err := conversationExistsTx(tx, contextUID)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			return contextmgr.ErrContextNotFound
-		}
-
-		var nextIndex int64
-		if err := tx.Model(&contextMessage{}).
-			Where("context_uid = ?", contextUID.String()).
-			Select("COALESCE(MAX(message_index), -1) + 1").
-			Scan(&nextIndex).Error; err != nil {
-			return err
-		}
-		if err := tx.Create(&contextMessage{
-			ContextUID:   contextUID.String(),
-			MessageIndex: nextIndex,
-			Payload:      payload,
-		}).Error; err != nil {
-			return err
-		}
-		return tx.Where("context_uid = ?", contextUID.String()).Delete(&pendingMessage{}).Error
-	})
+	result := s.db.WithContext(ctx).
+		Model(&contextConversation{}).
+		Where("context_uid = ? AND revision = ?", contextUID.String(), expectedRevision).
+		Updates(map[string]any{
+			"revision":      next.Revision,
+			"state_payload": payload,
+			"updated_at":    time.Now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 1 {
+		return nil
+	}
+	return s.conflictError(ctx, contextUID)
 }
 
-func (m *SQLiteContextManager) Delete(ctx context.Context, contextUID common.ContextUID) error {
-	m.writeMu.Lock()
-	defer m.writeMu.Unlock()
-
-	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+func (s *SQLiteStore) Delete(ctx context.Context, contextUID common.ContextUID) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("context_uid = ?", contextUID.String()).Delete(&runSnapshot{}).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("context_uid = ?", contextUID.String()).Delete(&pendingMessage{}).Error; err != nil {
 			return err
 		}
@@ -431,51 +262,106 @@ func (m *SQLiteContextManager) Delete(ctx context.Context, contextUID common.Con
 	})
 }
 
-func (m *SQLiteContextManager) ensureConversation(ctx context.Context, contextUID common.ContextUID) error {
-	return ensureConversationTx(m.db.WithContext(ctx), contextUID)
-}
-
-func ensureConversationTx(tx *gorm.DB, contextUID common.ContextUID) error {
-	return tx.
-		Clauses(clause.OnConflict{DoNothing: true}).
-		Create(&contextConversation{ContextUID: contextUID.String()}).
-		Error
-}
-
-func conversationExistsTx(tx *gorm.DB, contextUID common.ContextUID) (bool, error) {
+func (s *SQLiteStore) conflictError(
+	ctx context.Context,
+	contextUID common.ContextUID,
+) error {
 	var count int64
-	if err := tx.Model(&contextConversation{}).
+	if err := s.db.WithContext(ctx).
+		Model(&contextConversation{}).
 		Where("context_uid = ?", contextUID.String()).
 		Count(&count).Error; err != nil {
-		return false, err
+		return err
 	}
-	return count > 0, nil
+	if count == 0 {
+		return contextmgr.ErrContextNotFound
+	}
+	return contextmgr.ErrRevisionConflict
 }
 
-func conversationFinalizedTx(tx *gorm.DB, contextUID common.ContextUID) (bool, error) {
-	var row contextMessage
-	err := tx.Where("context_uid = ?", contextUID.String()).
-		Order("message_index DESC").
-		Take(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
+func loadLegacyState(db *gorm.DB, contextUID common.ContextUID) (*contextmgr.State, error) {
+	var messageRows []contextMessage
+	if err := db.Where("context_uid = ?", contextUID.String()).
+		Order("message_index ASC").
+		Find(&messageRows).Error; err != nil {
+		return nil, err
 	}
-	if err != nil {
-		return false, err
+	messages := make([]*schema.AgenticMessage, 0, len(messageRows))
+	for _, row := range messageRows {
+		message, err := decodeMessage(row.Payload)
+		if err != nil {
+			return nil, fmt.Errorf("decode legacy message %d: %w", row.MessageIndex, err)
+		}
+		messages = append(messages, message)
 	}
-	message, err := decodeMessage(row.Payload)
-	if err != nil {
-		return false, err
+
+	state := contextmgr.NewState(messages)
+	var pendingRows []pendingMessage
+	if err := db.Where("context_uid = ?", contextUID.String()).
+		Order("id ASC").
+		Find(&pendingRows).Error; err != nil {
+		return nil, err
 	}
-	return contextmgr.IsFinalAnswerMessage(message), nil
+	for _, row := range pendingRows {
+		message, err := decodeMessage(row.Payload)
+		if err != nil {
+			return nil, fmt.Errorf("decode legacy pending message %d: %w", row.ID, err)
+		}
+		state.PendingMessages = append(state.PendingMessages, message)
+	}
+
+	var snapshotRows []runSnapshot
+	if err := db.Where("context_uid = ?", contextUID.String()).
+		Order("id ASC").
+		Find(&snapshotRows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range snapshotRows {
+		var snapshotMessages []*schema.AgenticMessage
+		if err := sonic.UnmarshalString(row.Payload, &snapshotMessages); err != nil {
+			return nil, fmt.Errorf("decode legacy run snapshot %s: %w", row.RunUID, err)
+		}
+		state.RunSnapshots[common.RunUID(row.RunUID)] = contextmgr.RunSnapshot{
+			Outcome:  inferLegacyOutcome(snapshotMessages),
+			Messages: common.CloneAgenticMessages(snapshotMessages),
+		}
+	}
+	return state, nil
 }
 
-func encodeMessage(message *schema.AgenticMessage) (string, error) {
-	b, err := sonic.Marshal(message)
+func inferLegacyOutcome(messages []*schema.AgenticMessage) contextmgr.RunOutcome {
+	if len(messages) > 0 && isFinalAnswerMessage(messages[len(messages)-1]) {
+		return contextmgr.RunOutcomeCompleted
+	}
+	return contextmgr.RunOutcomeInterrupted
+}
+
+func isFinalAnswerMessage(message *schema.AgenticMessage) bool {
+	if message == nil || message.Role != schema.AgenticRoleTypeAssistant {
+		return false
+	}
+	for _, block := range message.ContentBlocks {
+		if block != nil && block.FunctionToolCall != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func encodeState(state *contextmgr.State) (string, error) {
+	payload, err := sonic.Marshal(state.Clone())
 	if err != nil {
 		return "", err
 	}
-	return util.ByteToString(b), nil
+	return util.ByteToString(payload), nil
+}
+
+func decodeState(payload string) (*contextmgr.State, error) {
+	var state contextmgr.State
+	if err := sonic.UnmarshalString(payload, &state); err != nil {
+		return nil, err
+	}
+	return state.Clone(), nil
 }
 
 func decodeMessage(payload string) (*schema.AgenticMessage, error) {

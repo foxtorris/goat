@@ -2,152 +2,117 @@ package ram
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 
-	"github.com/cloudwego/eino/schema"
+	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
 )
 
-// RAMContextManager manages conversation context in process memory.
-type RAMContextManager struct {
-	mu       sync.RWMutex
-	messages map[common.ContextUID][]*schema.AgenticMessage
-	pending  map[common.ContextUID][]*schema.AgenticMessage
+// RAMStore persists versioned context state in process memory.
+type RAMStore struct {
+	mu     sync.RWMutex
+	states map[common.ContextUID]*contextmgr.State
 }
 
-var _ contextmgr.ContextManager = (*RAMContextManager)(nil)
+var _ contextmgr.Store = (*RAMStore)(nil)
 
-// NewRAMContextManager creates an in-process context manager.
-func NewRAMContextManager() *RAMContextManager {
-	return &RAMContextManager{
-		messages: make(map[common.ContextUID][]*schema.AgenticMessage),
-		pending:  make(map[common.ContextUID][]*schema.AgenticMessage),
+// NewRAMStore creates an empty in-process Store.
+func NewRAMStore() *RAMStore {
+	return &RAMStore{states: make(map[common.ContextUID]*contextmgr.State)}
+}
+
+// NewRAMContextManager creates a Manager backed by in-process storage.
+func NewRAMContextManager() *contextmgr.Manager {
+	return contextmgr.NewManager(NewRAMStore())
+}
+
+func (s *RAMStore) Create(ctx context.Context, state *contextmgr.State) (common.ContextUID, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-func (m *RAMContextManager) InitNew(ctx context.Context) common.ContextUID {
-	contextUID := m.NewContextUID(ctx)
-
-	m.mu.Lock()
-	m.messages[contextUID] = []*schema.AgenticMessage{}
-	m.mu.Unlock()
-
-	return contextUID
-}
-
-func (m *RAMContextManager) NewContextUID(_ context.Context) common.ContextUID {
-	return common.ContextUID(uuid.NewString())
-}
-
-func (m *RAMContextManager) Append(_ context.Context, contextUID common.ContextUID, message *schema.AgenticMessage) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.messages[contextUID] = append(m.messages[contextUID], message)
-	return nil
-}
-
-func (m *RAMContextManager) GetAll(_ context.Context, contextUID common.ContextUID) []*schema.AgenticMessage {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	messages := m.messages[contextUID]
-	if len(messages) == 0 {
-		return []*schema.AgenticMessage{}
+	var contextUID common.ContextUID
+	for {
+		contextUID = common.ContextUID(uuid.NewString())
+		if _, exists := s.states[contextUID]; !exists {
+			break
+		}
 	}
-
-	// Return a copy to prevent external modification
-	return common.CloneAgenticMessages(messages)
+	next, err := cloneState(state)
+	if err != nil {
+		return "", err
+	}
+	next.Revision = 1
+	s.states[contextUID] = next
+	return contextUID, nil
 }
 
-func (m *RAMContextManager) Len(_ context.Context, contextUID common.ContextUID) int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+func (s *RAMStore) Load(ctx context.Context, contextUID common.ContextUID) (*contextmgr.State, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	return len(m.messages[contextUID])
+	state, exists := s.states[contextUID]
+	if !exists {
+		return nil, contextmgr.ErrContextNotFound
+	}
+	return cloneState(state)
 }
 
-func (m *RAMContextManager) Reset(_ context.Context, contextUID common.ContextUID, messages []*schema.AgenticMessage) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.messages[contextUID] = common.CloneAgenticMessages(messages)
-}
-
-func (m *RAMContextManager) EnqueuePendingMessages(
-	_ context.Context,
+func (s *RAMStore) CompareAndSwap(
+	ctx context.Context,
 	contextUID common.ContextUID,
-	messages []*schema.AgenticMessage,
+	expectedRevision uint64,
+	state *contextmgr.State,
 ) error {
-	if err := contextmgr.ValidatePendingMessages(messages); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	history, exists := m.messages[contextUID]
+	current, exists := s.states[contextUID]
 	if !exists {
 		return contextmgr.ErrContextNotFound
 	}
-	if len(history) > 0 && contextmgr.IsFinalAnswerMessage(history[len(history)-1]) {
-		return contextmgr.ErrConversationFinalized
+	if current.Revision != expectedRevision {
+		return contextmgr.ErrRevisionConflict
 	}
-	m.pending[contextUID] = append(m.pending[contextUID], common.CloneAgenticMessages(messages)...)
-	return nil
-}
-
-func (m *RAMContextManager) CommitTurn(
-	_ context.Context,
-	contextUID common.ContextUID,
-	turnMessages []*schema.AgenticMessage,
-) (*contextmgr.TurnCommitResult, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if _, exists := m.messages[contextUID]; !exists {
-		return nil, contextmgr.ErrContextNotFound
-	}
-
-	applied := common.CloneAgenticMessages(m.pending[contextUID])
-	m.messages[contextUID] = append(m.messages[contextUID], common.CloneAgenticMessages(turnMessages)...)
-	m.messages[contextUID] = append(m.messages[contextUID], applied...)
-	delete(m.pending, contextUID)
-
-	return &contextmgr.TurnCommitResult{AppliedPendingMessages: applied}, nil
-}
-
-func (m *RAMContextManager) CommitFinal(
-	_ context.Context,
-	contextUID common.ContextUID,
-	message *schema.AgenticMessage,
-) error {
-	if err := contextmgr.ValidateFinalMessage(message); err != nil {
+	next, err := cloneState(state)
+	if err != nil {
 		return err
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if _, exists := m.messages[contextUID]; !exists {
-		return contextmgr.ErrContextNotFound
-	}
-	m.messages[contextUID] = append(
-		m.messages[contextUID],
-		common.CloneAgenticMessages([]*schema.AgenticMessage{message})[0],
-	)
-	delete(m.pending, contextUID)
+	next.Revision = expectedRevision + 1
+	s.states[contextUID] = next
 	return nil
 }
 
-func (m *RAMContextManager) Delete(_ context.Context, contextUID common.ContextUID) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	delete(m.messages, contextUID)
-	delete(m.pending, contextUID)
+func (s *RAMStore) Delete(ctx context.Context, contextUID common.ContextUID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.states, contextUID)
 	return nil
+}
+
+func cloneState(state *contextmgr.State) (*contextmgr.State, error) {
+	payload, err := sonic.Marshal(state.Clone())
+	if err != nil {
+		return nil, fmt.Errorf("encode context state: %w", err)
+	}
+	var clone contextmgr.State
+	if err := sonic.Unmarshal(payload, &clone); err != nil {
+		return nil, fmt.Errorf("decode context state: %w", err)
+	}
+	return clone.Clone(), nil
 }

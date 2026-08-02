@@ -11,7 +11,6 @@ import (
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	"github.com/torrischen/goat/util"
-	"github.com/torrischen/goat/util/logging"
 
 	"github.com/bytedance/sonic"
 	"github.com/cloudwego/eino/schema"
@@ -19,26 +18,28 @@ import (
 	"github.com/google/uuid"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
-// MysqlContextManager manages conversation context using MySQL through GORM.
-type MysqlContextManager struct {
+// MysqlStore persists a complete versioned context state in one MySQL row.
+type MysqlStore struct {
 	db *gorm.DB
 }
 
-var _ contextmgr.ContextManager = (*MysqlContextManager)(nil)
+var _ contextmgr.Store = (*MysqlStore)(nil)
 
 type contextConversation struct {
-	ContextUID string `gorm:"column:context_uid;primaryKey;size:191"`
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ContextUID   string `gorm:"column:context_uid;primaryKey;size:191"`
+	Revision     uint64 `gorm:"column:revision;not null;default:1"`
+	StatePayload string `gorm:"column:state_payload;type:longtext"`
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 func (contextConversation) TableName() string {
 	return "goat_context_conversations"
 }
 
+// Legacy rows are read only when state_payload is empty.
 type contextMessage struct {
 	ID           uint64 `gorm:"primaryKey;autoIncrement"`
 	ContextUID   string `gorm:"column:context_uid;size:191;not null;index:idx_goat_context_messages_uid;uniqueIndex:idx_goat_context_uid_message_index,priority:1"`
@@ -62,23 +63,63 @@ func (pendingMessage) TableName() string {
 	return "goat_context_pending_messages"
 }
 
-// NewMysqlContextManager creates a MySQL-backed context manager and migrates its tables.
-func NewMysqlContextManager(host string, port int, username, password, dbname string) (*MysqlContextManager, error) {
+type runSnapshot struct {
+	ID         uint64 `gorm:"primaryKey;autoIncrement"`
+	ContextUID string `gorm:"column:context_uid;size:191;not null;index:idx_goat_context_run_snapshots_uid;uniqueIndex:idx_goat_context_run_snapshot_key,priority:1"`
+	RunUID     string `gorm:"column:run_uid;size:191;not null;uniqueIndex:idx_goat_context_run_snapshot_key,priority:2"`
+	Payload    string `gorm:"column:payload;type:longtext;not null"`
+	CreatedAt  time.Time
+}
+
+func (runSnapshot) TableName() string {
+	return "goat_context_run_snapshots"
+}
+
+// NewMysqlContextManager creates a Manager backed by MySQL.
+func NewMysqlContextManager(
+	host string,
+	port int,
+	username string,
+	password string,
+	dbname string,
+) (*contextmgr.Manager, error) {
+	store, err := NewMysqlStore(host, port, username, password, dbname)
+	if err != nil {
+		return nil, err
+	}
+	return contextmgr.NewManager(store), nil
+}
+
+// NewMysqlStore opens MySQL and migrates the current and compatibility tables.
+func NewMysqlStore(
+	host string,
+	port int,
+	username string,
+	password string,
+	dbname string,
+) (*MysqlStore, error) {
 	dsn, err := buildDSN(host, port, username, password, dbname)
 	if err != nil {
 		return nil, err
 	}
-
 	db, err := gorm.Open(gormmysql.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return nil, err
 	}
-
-	if err := db.AutoMigrate(&contextConversation{}, &contextMessage{}, &pendingMessage{}); err != nil {
+	if err := db.AutoMigrate(
+		&contextConversation{},
+		&contextMessage{},
+		&pendingMessage{},
+		&runSnapshot{},
+	); err != nil {
 		return nil, err
 	}
-
-	return &MysqlContextManager{db: db}, nil
+	if err := db.Model(&contextConversation{}).
+		Where("revision = ?", 0).
+		Update("revision", 1).Error; err != nil {
+		return nil, err
+	}
+	return &MysqlStore{db: db}, nil
 }
 
 func buildDSN(host string, port int, username, password, dbname string) (string, error) {
@@ -106,274 +147,101 @@ func buildDSN(host string, port int, username, password, dbname string) (string,
 		"charset": "utf8mb4",
 		"loc":     "Local",
 	}
-
 	return cfg.FormatDSN(), nil
 }
 
-func (m *MysqlContextManager) InitNew(ctx context.Context) common.ContextUID {
-	contextUID := m.NewContextUID(ctx)
-
-	if err := m.ensureConversation(ctx, contextUID); err != nil {
-		logging.Errorf("Failed to initialize mysql conversation %s: %v", contextUID, err)
+func (s *MysqlStore) Create(
+	ctx context.Context,
+	state *contextmgr.State,
+) (common.ContextUID, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-
-	return contextUID
-}
-
-func (m *MysqlContextManager) NewContextUID(_ context.Context) common.ContextUID {
-	return common.ContextUID(uuid.NewString())
-}
-
-func (m *MysqlContextManager) Append(ctx context.Context, contextUID common.ContextUID, message *schema.AgenticMessage) error {
-	payload, err := encodeMessage(message)
+	next := state.Clone()
+	next.Revision = 1
+	payload, err := encodeState(next)
 	if err != nil {
-		return err
+		return "", err
 	}
-
-	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := lockConversation(tx, contextUID); err != nil {
-			return err
-		}
-
-		var messageIndex int64
-		if err := tx.Model(&contextMessage{}).
-			Where("context_uid = ?", contextUID.String()).
-			Select("COALESCE(MAX(message_index), -1) + 1").
-			Scan(&messageIndex).Error; err != nil {
-			return err
-		}
-
-		return tx.Create(&contextMessage{
-			ContextUID:   contextUID.String(),
-			MessageIndex: messageIndex,
-			Payload:      payload,
-		}).Error
-	})
+	contextUID := common.ContextUID(uuid.NewString())
+	if err := s.db.WithContext(ctx).Create(&contextConversation{
+		ContextUID:   contextUID.String(),
+		Revision:     next.Revision,
+		StatePayload: payload,
+	}).Error; err != nil {
+		return "", err
+	}
+	return contextUID, nil
 }
 
-func (m *MysqlContextManager) GetAll(ctx context.Context, contextUID common.ContextUID) []*schema.AgenticMessage {
-	var rows []contextMessage
-	if err := m.db.WithContext(ctx).
-		Where("context_uid = ?", contextUID.String()).
-		Order("message_index ASC").
-		Find(&rows).Error; err != nil {
-		logging.Errorf("Failed to load mysql conversation %s: %v", contextUID, err)
-		return []*schema.AgenticMessage{}
-	}
-
-	messages := make([]*schema.AgenticMessage, 0, len(rows))
-	for _, row := range rows {
-		msg, err := decodeMessage(row.Payload)
-		if err != nil {
-			logging.Errorf("Failed to decode mysql conversation %s message %d: %v", contextUID, row.MessageIndex, err)
-			continue
-		}
-		messages = append(messages, msg)
-	}
-
-	return common.CloneAgenticMessages(messages)
-}
-
-func (m *MysqlContextManager) Len(ctx context.Context, contextUID common.ContextUID) int {
-	var count int64
-	if err := m.db.WithContext(ctx).
-		Model(&contextMessage{}).
-		Where("context_uid = ?", contextUID.String()).
-		Count(&count).Error; err != nil {
-		logging.Errorf("Failed to count mysql conversation %s: %v", contextUID, err)
-		return 0
-	}
-
-	return int(count)
-}
-
-func (m *MysqlContextManager) Reset(ctx context.Context, contextUID common.ContextUID, messages []*schema.AgenticMessage) {
-	rows := make([]contextMessage, 0, len(messages))
-	for i, message := range messages {
-		payload, err := encodeMessage(message)
-		if err != nil {
-			logging.Errorf("Failed to encode mysql conversation %s message %d: %v", contextUID, i, err)
-			return
-		}
-		rows = append(rows, contextMessage{
-			ContextUID:   contextUID.String(),
-			MessageIndex: int64(i),
-			Payload:      payload,
-		})
-	}
-
-	if err := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := lockConversation(tx, contextUID); err != nil {
-			return err
-		}
-		if err := tx.Where("context_uid = ?", contextUID.String()).Delete(&contextMessage{}).Error; err != nil {
-			return err
-		}
-		if len(rows) == 0 {
-			return nil
-		}
-		return tx.Create(&rows).Error
-	}); err != nil {
-		logging.Errorf("Failed to reset mysql conversation %s: %v", contextUID, err)
-	}
-}
-
-func (m *MysqlContextManager) EnqueuePendingMessages(
+func (s *MysqlStore) Load(
 	ctx context.Context,
 	contextUID common.ContextUID,
-	messages []*schema.AgenticMessage,
-) error {
-	if err := contextmgr.ValidatePendingMessages(messages); err != nil {
-		return err
+) (*contextmgr.State, error) {
+	var row contextConversation
+	err := s.db.WithContext(ctx).
+		Where("context_uid = ?", contextUID.String()).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, contextmgr.ErrContextNotFound
 	}
-
-	rows := make([]pendingMessage, 0, len(messages))
-	for _, message := range messages {
-		payload, err := encodeMessage(message)
-		if err != nil {
-			return err
-		}
-		rows = append(rows, pendingMessage{ContextUID: contextUID.String(), Payload: payload})
-	}
-
-	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := lockExistingConversation(tx, contextUID); err != nil {
-			return err
-		}
-		finalized, err := conversationFinalizedTx(tx, contextUID)
-		if err != nil {
-			return err
-		}
-		if finalized {
-			return contextmgr.ErrConversationFinalized
-		}
-		if len(rows) == 0 {
-			return nil
-		}
-		return tx.Create(&rows).Error
-	})
-}
-
-func (m *MysqlContextManager) CommitTurn(
-	ctx context.Context,
-	contextUID common.ContextUID,
-	turnMessages []*schema.AgenticMessage,
-) (*contextmgr.TurnCommitResult, error) {
-	turnPayloads := make([]string, 0, len(turnMessages))
-	for _, message := range turnMessages {
-		payload, err := encodeMessage(message)
-		if err != nil {
-			return nil, err
-		}
-		turnPayloads = append(turnPayloads, payload)
-	}
-
-	applied := make([]*schema.AgenticMessage, 0)
-	err := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := lockExistingConversation(tx, contextUID); err != nil {
-			return err
-		}
-
-		var pendingRows []pendingMessage
-		if err := tx.Where("context_uid = ?", contextUID.String()).
-			Order("id ASC").
-			Find(&pendingRows).Error; err != nil {
-			return err
-		}
-
-		applied = make([]*schema.AgenticMessage, 0, len(pendingRows))
-		for _, row := range pendingRows {
-			message, err := decodeMessage(row.Payload)
-			if err != nil {
-				return err
-			}
-			applied = append(applied, message)
-		}
-
-		var nextIndex int64
-		if err := tx.Model(&contextMessage{}).
-			Where("context_uid = ?", contextUID.String()).
-			Select("COALESCE(MAX(message_index), -1) + 1").
-			Scan(&nextIndex).Error; err != nil {
-			return err
-		}
-
-		rows := make([]contextMessage, 0, len(turnPayloads)+len(pendingRows))
-		for _, payload := range turnPayloads {
-			rows = append(rows, contextMessage{
-				ContextUID:   contextUID.String(),
-				MessageIndex: nextIndex,
-				Payload:      payload,
-			})
-			nextIndex++
-		}
-		for _, row := range pendingRows {
-			rows = append(rows, contextMessage{
-				ContextUID:   contextUID.String(),
-				MessageIndex: nextIndex,
-				Payload:      row.Payload,
-			})
-			nextIndex++
-		}
-		if len(rows) > 0 {
-			if err := tx.Create(&rows).Error; err != nil {
-				return err
-			}
-		}
-		if len(pendingRows) > 0 {
-			if err := tx.Where("context_uid = ?", contextUID.String()).Delete(&pendingMessage{}).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 	if err != nil {
 		return nil, err
 	}
+	if row.StatePayload != "" {
+		state, err := decodeState(row.StatePayload)
+		if err != nil {
+			return nil, fmt.Errorf("decode context %s state: %w", contextUID, err)
+		}
+		state.Revision = row.Revision
+		return state.Clone(), nil
+	}
 
-	return &contextmgr.TurnCommitResult{
-		AppliedPendingMessages: common.CloneAgenticMessages(applied),
-	}, nil
+	state, err := loadLegacyState(s.db.WithContext(ctx), contextUID)
+	if err != nil {
+		return nil, err
+	}
+	state.Revision = row.Revision
+	return state.Clone(), nil
 }
 
-func (m *MysqlContextManager) CommitFinal(
+func (s *MysqlStore) CompareAndSwap(
 	ctx context.Context,
 	contextUID common.ContextUID,
-	message *schema.AgenticMessage,
+	expectedRevision uint64,
+	state *contextmgr.State,
 ) error {
-	if err := contextmgr.ValidateFinalMessage(message); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	payload, err := encodeMessage(message)
+	next := state.Clone()
+	next.Revision = expectedRevision + 1
+	payload, err := encodeState(next)
 	if err != nil {
 		return err
 	}
-
-	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := lockExistingConversation(tx, contextUID); err != nil {
-			return err
-		}
-
-		var nextIndex int64
-		if err := tx.Model(&contextMessage{}).
-			Where("context_uid = ?", contextUID.String()).
-			Select("COALESCE(MAX(message_index), -1) + 1").
-			Scan(&nextIndex).Error; err != nil {
-			return err
-		}
-		if err := tx.Create(&contextMessage{
-			ContextUID:   contextUID.String(),
-			MessageIndex: nextIndex,
-			Payload:      payload,
-		}).Error; err != nil {
-			return err
-		}
-		return tx.Where("context_uid = ?", contextUID.String()).Delete(&pendingMessage{}).Error
-	})
+	result := s.db.WithContext(ctx).
+		Model(&contextConversation{}).
+		Where("context_uid = ? AND revision = ?", contextUID.String(), expectedRevision).
+		Updates(map[string]any{
+			"revision":      next.Revision,
+			"state_payload": payload,
+			"updated_at":    time.Now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 1 {
+		return nil
+	}
+	return s.conflictError(ctx, contextUID)
 }
 
-func (m *MysqlContextManager) Delete(ctx context.Context, contextUID common.ContextUID) error {
-	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+func (s *MysqlStore) Delete(ctx context.Context, contextUID common.ContextUID) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("context_uid = ?", contextUID.String()).Delete(&runSnapshot{}).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("context_uid = ?", contextUID.String()).Delete(&pendingMessage{}).Error; err != nil {
 			return err
 		}
@@ -384,59 +252,103 @@ func (m *MysqlContextManager) Delete(ctx context.Context, contextUID common.Cont
 	})
 }
 
-func (m *MysqlContextManager) ensureConversation(ctx context.Context, contextUID common.ContextUID) error {
-	return m.db.WithContext(ctx).
-		Clauses(clause.OnConflict{DoNothing: true}).
-		Create(&contextConversation{ContextUID: contextUID.String()}).
-		Error
-}
-
-func lockConversation(tx *gorm.DB, contextUID common.ContextUID) error {
-	conversation := contextConversation{ContextUID: contextUID.String()}
-	if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&conversation).Error; err != nil {
+func (s *MysqlStore) conflictError(ctx context.Context, contextUID common.ContextUID) error {
+	var count int64
+	if err := s.db.WithContext(ctx).
+		Model(&contextConversation{}).
+		Where("context_uid = ?", contextUID.String()).
+		Count(&count).Error; err != nil {
 		return err
 	}
-
-	return tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("context_uid = ?", contextUID.String()).
-		First(&conversation).Error
-}
-
-func lockExistingConversation(tx *gorm.DB, contextUID common.ContextUID) error {
-	conversation := contextConversation{}
-	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("context_uid = ?", contextUID.String()).
-		First(&conversation).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	if count == 0 {
 		return contextmgr.ErrContextNotFound
 	}
-	return err
+	return contextmgr.ErrRevisionConflict
 }
 
-func conversationFinalizedTx(tx *gorm.DB, contextUID common.ContextUID) (bool, error) {
-	var row contextMessage
-	err := tx.Where("context_uid = ?", contextUID.String()).
-		Order("message_index DESC").
-		Take(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
+func loadLegacyState(db *gorm.DB, contextUID common.ContextUID) (*contextmgr.State, error) {
+	var messageRows []contextMessage
+	if err := db.Where("context_uid = ?", contextUID.String()).
+		Order("message_index ASC").
+		Find(&messageRows).Error; err != nil {
+		return nil, err
 	}
-	if err != nil {
-		return false, err
+	messages := make([]*schema.AgenticMessage, 0, len(messageRows))
+	for _, row := range messageRows {
+		message, err := decodeMessage(row.Payload)
+		if err != nil {
+			return nil, fmt.Errorf("decode legacy message %d: %w", row.MessageIndex, err)
+		}
+		messages = append(messages, message)
 	}
-	message, err := decodeMessage(row.Payload)
-	if err != nil {
-		return false, err
+
+	state := contextmgr.NewState(messages)
+	var pendingRows []pendingMessage
+	if err := db.Where("context_uid = ?", contextUID.String()).
+		Order("id ASC").
+		Find(&pendingRows).Error; err != nil {
+		return nil, err
 	}
-	return contextmgr.IsFinalAnswerMessage(message), nil
+	for _, row := range pendingRows {
+		message, err := decodeMessage(row.Payload)
+		if err != nil {
+			return nil, fmt.Errorf("decode legacy pending message %d: %w", row.ID, err)
+		}
+		state.PendingMessages = append(state.PendingMessages, message)
+	}
+
+	var snapshotRows []runSnapshot
+	if err := db.Where("context_uid = ?", contextUID.String()).
+		Order("id ASC").
+		Find(&snapshotRows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range snapshotRows {
+		var snapshotMessages []*schema.AgenticMessage
+		if err := sonic.UnmarshalString(row.Payload, &snapshotMessages); err != nil {
+			return nil, fmt.Errorf("decode legacy run snapshot %s: %w", row.RunUID, err)
+		}
+		state.RunSnapshots[common.RunUID(row.RunUID)] = contextmgr.RunSnapshot{
+			Outcome:  inferLegacyOutcome(snapshotMessages),
+			Messages: common.CloneAgenticMessages(snapshotMessages),
+		}
+	}
+	return state, nil
 }
 
-func encodeMessage(message *schema.AgenticMessage) (string, error) {
-	b, err := sonic.Marshal(message)
+func inferLegacyOutcome(messages []*schema.AgenticMessage) contextmgr.RunOutcome {
+	if len(messages) > 0 && isFinalAnswerMessage(messages[len(messages)-1]) {
+		return contextmgr.RunOutcomeCompleted
+	}
+	return contextmgr.RunOutcomeInterrupted
+}
+
+func isFinalAnswerMessage(message *schema.AgenticMessage) bool {
+	if message == nil || message.Role != schema.AgenticRoleTypeAssistant {
+		return false
+	}
+	for _, block := range message.ContentBlocks {
+		if block != nil && block.FunctionToolCall != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func encodeState(state *contextmgr.State) (string, error) {
+	payload, err := sonic.Marshal(state.Clone())
 	if err != nil {
 		return "", err
 	}
-	return util.ByteToString(b), nil
+	return util.ByteToString(payload), nil
+}
+
+func decodeState(payload string) (*contextmgr.State, error) {
+	var state contextmgr.State
+	if err := sonic.UnmarshalString(payload, &state); err != nil {
+		return nil, err
+	}
+	return state.Clone(), nil
 }
 
 func decodeMessage(payload string) (*schema.AgenticMessage, error) {

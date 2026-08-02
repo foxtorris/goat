@@ -6,70 +6,153 @@ import (
 	"testing"
 
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/agent/contextmgr"
+	"github.com/torrischen/goat/util"
 
+	"github.com/bytedance/sonic"
 	"github.com/cloudwego/eino/schema"
+	gormsqlite "gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
-func TestSQLiteContextManagerLifecycle(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	manager, err := NewSQLiteContextManager(filepath.Join(t.TempDir(), "context.sqlite"))
+func TestSQLiteStoreMigratesV02Schema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.sqlite")
+	db, err := gorm.Open(gormsqlite.Open(path), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	contextUID := manager.InitNew(ctx)
-	if got := manager.Len(ctx, contextUID); got != 0 {
-		t.Fatalf("Len() after InitNew = %d, want 0", got)
+	for _, statement := range []string{
+		`CREATE TABLE goat_context_conversations (
+context_uid text PRIMARY KEY,
+created_at datetime,
+updated_at datetime
+)`,
+		`CREATE TABLE goat_context_messages (
+id integer PRIMARY KEY AUTOINCREMENT,
+context_uid text NOT NULL,
+message_index integer NOT NULL,
+payload text NOT NULL,
+created_at datetime
+)`,
+		`CREATE UNIQUE INDEX idx_goat_context_uid_message_index
+ON goat_context_messages(context_uid, message_index)`,
+		`INSERT INTO goat_context_conversations(context_uid) VALUES ('legacy')`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	messagePayload := mustEncode(t, schema.UserAgenticMessage("legacy message"))
+	if err := db.Exec(
+		`INSERT INTO goat_context_messages(context_uid, message_index, payload)
+VALUES (?, 0, ?)`,
+		"legacy",
+		messagePayload,
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
 	}
 
-	userMsg := common.TextMessage(schema.AgenticRoleTypeUser, "hello")
-	assistantMsg := common.AssistantTextMessage("world")
-	if err := manager.Append(ctx, contextUID, userMsg); err != nil {
-		t.Fatalf("Append user message: %v", err)
+	store, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := manager.Append(ctx, contextUID, assistantMsg); err != nil {
-		t.Fatalf("Append assistant message: %v", err)
+	state, err := store.Load(context.Background(), "legacy")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	if got := manager.Len(ctx, contextUID); got != 2 {
-		t.Fatalf("Len() after append = %d, want 2", got)
-	}
-	messages := manager.GetAll(ctx, contextUID)
-	if got := len(messages); got != 2 {
-		t.Fatalf("len(GetAll()) = %d, want 2", got)
-	}
-	assertMessageEqual(t, messages[0], userMsg)
-	assertMessageEqual(t, messages[1], assistantMsg)
-
-	manager.Reset(ctx, contextUID, []*schema.AgenticMessage{
-		common.TextMessage(schema.AgenticRoleTypeUser, "reset"),
-	})
-	if got := manager.Len(ctx, contextUID); got != 1 {
-		t.Fatalf("Len() after reset = %d, want 1", got)
-	}
-
-	if err := manager.Delete(ctx, contextUID); err != nil {
-		t.Fatalf("Delete(): %v", err)
-	}
-	if got := manager.Len(ctx, contextUID); got != 0 {
-		t.Fatalf("Len() after delete = %d, want 0", got)
+	if state.Revision != 1 || len(state.Messages) != 1 {
+		t.Fatalf("migrated state = %+v", state)
 	}
 }
 
-func assertMessageEqual(t *testing.T, got, want *schema.AgenticMessage) {
-	t.Helper()
+func TestSQLiteStoreMigratesLegacyContextOnFirstCAS(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "context.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextUID := common.ContextUID("legacy-context")
+	runUID := common.RunUID("legacy-run")
+	user := schema.UserAgenticMessage("request")
+	common.MarkRunStart(user, runUID)
+	messages := []*schema.AgenticMessage{schema.SystemAgenticMessage("system"), user}
 
-	gotPayload, err := encodeMessage(got)
+	if err := store.db.WithContext(ctx).Create(&contextConversation{
+		ContextUID: contextUID.String(),
+		Revision:   1,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i, message := range messages {
+		payload := mustEncode(t, message)
+		if err := store.db.WithContext(ctx).Create(&contextMessage{
+			ContextUID:   contextUID.String(),
+			MessageIndex: int64(i),
+			Payload:      payload,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.db.WithContext(ctx).Create(&pendingMessage{
+		ContextUID: contextUID.String(),
+		Payload:    mustEncode(t, schema.UserAgenticMessage("pending")),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.WithContext(ctx).Create(&runSnapshot{
+		ContextUID: contextUID.String(),
+		RunUID:     runUID.String(),
+		Payload:    mustEncode(t, messages),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := store.Load(ctx, contextUID)
 	if err != nil {
-		t.Fatalf("encode got message: %v", err)
+		t.Fatal(err)
 	}
-	wantPayload, err := encodeMessage(want)
+	if len(state.Messages) != 2 || len(state.PendingMessages) != 1 || len(state.RunSnapshots) != 1 {
+		t.Fatalf("legacy state = %+v", state)
+	}
+
+	manager := contextmgr.NewManager(store)
+	forkedUID, err := manager.Fork(ctx, common.RunSignature{ContextUID: contextUID, RunUID: runUID})
+	if err != nil || forkedUID == "" {
+		t.Fatalf("Fork(legacy snapshot) = %q, %v", forkedUID, err)
+	}
+	result, err := manager.CommitTurn(ctx, contextUID, nil)
+	if err != nil || len(result.AppliedPendingMessages) != 1 {
+		t.Fatalf("CommitTurn() = %+v, %v", result, err)
+	}
+
+	var row contextConversation
+	if err := store.db.WithContext(ctx).Where("context_uid = ?", contextUID.String()).Take(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Revision != 2 || row.StatePayload == "" {
+		t.Fatalf("migrated row = %+v", row)
+	}
+}
+
+func TestNewSQLiteContextManager(t *testing.T) {
+	manager, err := NewSQLiteContextManager(filepath.Join(t.TempDir(), "context.sqlite"))
+	if err != nil || manager == nil {
+		t.Fatalf("NewSQLiteContextManager() = %v, %v", manager, err)
+	}
+}
+
+func mustEncode(t *testing.T, value any) string {
+	t.Helper()
+	payload, err := sonic.Marshal(value)
 	if err != nil {
-		t.Fatalf("encode want message: %v", err)
+		t.Fatal(err)
 	}
-	if gotPayload != wantPayload {
-		t.Fatalf("message payload = %s, want %s", gotPayload, wantPayload)
-	}
+	return util.ByteToString(payload)
 }

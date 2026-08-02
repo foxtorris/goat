@@ -1,12 +1,12 @@
 package mysql
 
 import (
-	"context"
 	"strings"
 	"testing"
 
+	"github.com/torrischen/goat/agent/contextmgr"
+
 	"github.com/cloudwego/eino/schema"
-	"github.com/torrischen/goat/agent/common"
 )
 
 func TestBuildDSN(t *testing.T) {
@@ -34,34 +34,33 @@ func TestBuildDSN(t *testing.T) {
 	}
 }
 
-func TestModelsAndMessageCodec(t *testing.T) {
+func TestModelsAndStateCodec(t *testing.T) {
 	if (contextConversation{}).TableName() != "goat_context_conversations" ||
 		(contextMessage{}).TableName() != "goat_context_messages" ||
-		(pendingMessage{}).TableName() != "goat_context_pending_messages" {
+		(pendingMessage{}).TableName() != "goat_context_pending_messages" ||
+		(runSnapshot{}).TableName() != "goat_context_run_snapshots" {
 		t.Fatal("unexpected table names")
 	}
-	message := common.AssistantTextMessage("hello")
-	payload, err := encodeMessage(message)
+	state := contextmgr.NewState([]*schema.AgenticMessage{schema.UserAgenticMessage("hello")})
+	state.Revision = 4
+	payload, err := encodeState(state)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := decodeMessage(payload)
-	if err != nil || decoded.Role != schema.AgenticRoleTypeAssistant || decoded.ContentBlocks[0].AssistantGenText.Text != "hello" {
+	decoded, err := decodeState(payload)
+	if err != nil || decoded.Revision != 4 || len(decoded.Messages) != 1 {
 		t.Fatalf("decoded = %+v, %v", decoded, err)
 	}
-	if _, err := decodeMessage("not-json"); err == nil {
+	if _, err := decodeState("not-json"); err == nil {
 		t.Fatal("invalid payload decoded")
-	}
-	m := &MysqlContextManager{}
-	first := m.NewContextUID(context.Background())
-	second := m.NewContextUID(context.Background())
-	if first == "" || first == second {
-		t.Fatalf("generated IDs = %q, %q", first, second)
 	}
 }
 
 func TestNewMysqlContextManagerRejectsInvalidConfiguration(t *testing.T) {
 	if _, err := NewMysqlContextManager("", 3306, "user", "pass", "db"); err == nil {
 		t.Fatal("invalid configuration accepted")
+	}
+	if _, err := NewMysqlStore("localhost", 0, "user", "pass", "db"); err == nil {
+		t.Fatal("invalid Store configuration accepted")
 	}
 }

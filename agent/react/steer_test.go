@@ -127,7 +127,7 @@ func TestFinalAnswerDiscardsPendingSteeringAndClosesInbox(t *testing.T) {
 		t.Fatalf("model call count = %d, want 1", got)
 	}
 
-	history := manager.GetAll(ctx, signature.ContextUID)
+	history := mustLoadHistory(t, ctx, manager, signature.ContextUID)
 	if len(history) != 3 {
 		t.Fatalf("history count = %d, want system, user, final", len(history))
 	}

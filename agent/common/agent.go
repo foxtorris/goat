@@ -16,6 +16,12 @@ type AgentSteerArgs struct {
 	UserInputs []AgentUserInput
 }
 
+// AgentForkArgs identifies the settled run whose committed context becomes a
+// new conversation. The selected run is included in the forked history.
+type AgentForkArgs struct {
+	From RunSignature
+}
+
 type AgentDoArgs struct {
 	UserInput AgentUserInput
 	// ContextUID is the unique identifier for a conversation.
@@ -81,6 +87,11 @@ type Agent interface {
 	// and returns the conversation/run signature and the event stream. The stream
 	// is closed when the run finishes, is interrupted, or stops with an error.
 	Do(context.Context, *AgentDoArgs, ...model.Option) (RunSignature, streaming.Stream[AgentEvent], error)
+
+	// Fork creates a new conversation from the immutable context snapshot saved
+	// when From settled. It copies committed history through that run, excludes
+	// pending steering messages, and does not start a new agent run.
+	Fork(context.Context, *AgentForkArgs) (ContextUID, error)
 
 	// Steer queues one or more user messages for a conversation. Messages are
 	// committed after the next complete non-final turn. A final answer discards

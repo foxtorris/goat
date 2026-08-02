@@ -31,9 +31,11 @@ import (
 
 var _ common.Agent = (*Agent)(nil)
 
+const settleRunTimeout = 5 * time.Second
+
 type Agent struct {
 	mu              *sync.RWMutex
-	contextManager  contextmgr.ContextManager
+	contextManager  *contextmgr.Manager
 	skillsEnabled   bool
 	skillExcludes   []string
 	llmClient       model.AgenticModel
@@ -125,7 +127,7 @@ type Agent struct {
 func NewAgent(
 	llm model.AgenticModel,
 	modelMaxTokensK int,
-	manager contextmgr.ContextManager,
+	manager *contextmgr.Manager,
 ) *Agent {
 	a := &Agent{
 		mu:              &sync.RWMutex{},
@@ -350,7 +352,7 @@ func (a *Agent) buildSystemPrompt(
 
 func appendConversationMessage(
 	ctx context.Context,
-	manager contextmgr.ContextManager,
+	manager *contextmgr.Manager,
 	contextUID common.ContextUID,
 	messages *[]*schema.AgenticMessage,
 	message *schema.AgenticMessage,
@@ -361,7 +363,7 @@ func appendConversationMessage(
 
 func commitConversationTurn(
 	ctx context.Context,
-	manager contextmgr.ContextManager,
+	manager *contextmgr.Manager,
 	contextUID common.ContextUID,
 	messages *[]*schema.AgenticMessage,
 	turnMessages ...*schema.AgenticMessage,
@@ -376,14 +378,18 @@ func commitConversationTurn(
 	return result.AppliedPendingMessages, nil
 }
 
-func commitConversationFinal(
+func settleConversationFinal(
 	ctx context.Context,
-	manager contextmgr.ContextManager,
-	contextUID common.ContextUID,
+	manager *contextmgr.Manager,
+	signature common.RunSignature,
 	messages *[]*schema.AgenticMessage,
 	message *schema.AgenticMessage,
 ) error {
-	if err := manager.CommitFinal(ctx, contextUID, message); err != nil {
+	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+		Signature:    signature,
+		Outcome:      contextmgr.RunOutcomeCompleted,
+		FinalMessage: message,
+	}); err != nil {
 		return err
 	}
 	*messages = append(*messages, message)
@@ -486,6 +492,29 @@ func cloneAgentDoArgs(args *common.AgentDoArgs) *common.AgentDoArgs {
 	return &clone
 }
 
+// Fork creates a new conversation from a settled run without starting the
+// agent loop. The context manager owns the immutable snapshot and atomic copy.
+func (a *Agent) Fork(
+	ctx context.Context,
+	args *common.AgentForkArgs,
+) (common.ContextUID, error) {
+	if args == nil {
+		return "", fmt.Errorf("agent fork args is nil")
+	}
+	if args.From.ContextUID == "" {
+		return "", fmt.Errorf("agent fork context UID is empty: %w", contextmgr.ErrInvalidRunSignature)
+	}
+	if args.From.RunUID == "" {
+		return "", fmt.Errorf("agent fork run UID is empty: %w", contextmgr.ErrInvalidRunSignature)
+	}
+
+	contextUID, err := a.contextManager.Fork(ctx, args.From)
+	if err != nil {
+		return "", fmt.Errorf("fork context: %w", err)
+	}
+	return contextUID, nil
+}
+
 // Steer queues user messages in the conversation's context-manager-backed
 // pending inbox. They are applied after the next complete non-final turn. A
 // final answer discards pending messages and closes the inbox until the next Do
@@ -507,7 +536,7 @@ func (a *Agent) Steer(ctx context.Context, args *common.AgentSteerArgs) error {
 		messages = append(messages, userInputMessage(input))
 	}
 
-	if err := a.contextManager.EnqueuePendingMessages(ctx, args.ContextUID, messages); err != nil {
+	if err := a.contextManager.Enqueue(ctx, args.ContextUID, messages); err != nil {
 		return fmt.Errorf("enqueue steering messages: %w", err)
 	}
 	return nil
@@ -551,25 +580,27 @@ func (a *Agent) Do(
 
 	// Initialize or restore conversation
 	if args.ContextUID == "" {
-		// New conversation
-		contextUID = a.contextManager.InitNew(ctx)
-
-		// Add and store system message
 		systemMessage := schema.SystemAgenticMessage(systemPrompt)
 		messages = []*schema.AgenticMessage{systemMessage}
-		if err := a.contextManager.Append(ctx, contextUID, systemMessage); err != nil {
-			return common.RunSignature{}, nil, fmt.Errorf("failed to store system message: %w", err)
+		var err error
+		contextUID, err = a.contextManager.Create(ctx, messages)
+		if err != nil {
+			return common.RunSignature{}, nil, fmt.Errorf("failed to create conversation: %w", err)
 		}
 	} else {
 		// Continue existing conversation
 		contextUID = args.ContextUID
 
 		// Restore the managed conversation history.
-		messages = a.contextManager.GetAll(ctx, contextUID)
+		var err error
+		messages, err = a.contextManager.Load(ctx, contextUID)
+		if err != nil {
+			return common.RunSignature{}, nil, fmt.Errorf("failed to load conversation: %w", err)
+		}
 		if len(messages) == 0 {
 			systemMessage := schema.SystemAgenticMessage(systemPrompt)
 			messages = []*schema.AgenticMessage{systemMessage}
-			if err := a.contextManager.Append(ctx, contextUID, systemMessage); err != nil {
+			if err := a.contextManager.Replace(ctx, contextUID, messages); err != nil {
 				return common.RunSignature{}, nil, fmt.Errorf("failed to store system message: %w", err)
 			}
 			logging.Infof("Agent.Do: initialized empty conversation %s", contextUID)
@@ -586,7 +617,9 @@ func (a *Agent) Do(
 				logging.Infof("Agent.Do: inserted system message for conversation %s", contextUID)
 			}
 			// Update the managed context with the new system prompt.
-			a.contextManager.Reset(ctx, contextUID, messages)
+			if err := a.contextManager.Replace(ctx, contextUID, messages); err != nil {
+				return common.RunSignature{}, nil, fmt.Errorf("failed to update system message: %w", err)
+			}
 
 			logging.Infof("Agent.Do: Restored %d messages from conversation %s", len(messages), contextUID)
 		}
@@ -649,6 +682,7 @@ func (a *Agent) Do(
 	iterationsUsed := 0
 	toolCallsUsed := 0
 	runUsage := &common.AgentUsage{}
+	runSettled := false
 
 	runLoop := func() error {
 		writeFinal := func() error {
@@ -665,15 +699,16 @@ func (a *Agent) Do(
 			addRunUsage(runUsage, usage)
 			finalMessage := common.AssistantTextMessage(finalAnswer)
 			finalMessage.ResponseMeta = responseMetaFromUsage(usage)
-			if err := commitConversationFinal(
+			if err := settleConversationFinal(
 				actx,
 				a.contextManager,
-				contextUID,
+				runSignature,
 				&messages,
 				finalMessage,
 			); err != nil {
-				return operationError("commit final answer", err)
+				return operationError("settle run", err)
 			}
+			runSettled = true
 
 			iterationsUsed++
 			if err := eventStream.WriteWithContext(actx, common.FinalAnswerCompletedEvent{Answer: finalAnswer}); err != nil {
@@ -718,7 +753,9 @@ func (a *Agent) Do(
 			if thinkResult.IsCompressed {
 				if len(thinkResult.CompressedMessages) > 0 {
 					messages = thinkResult.CompressedMessages
-					a.contextManager.Reset(actx, contextUID, messages)
+					if err := a.contextManager.Replace(actx, contextUID, messages); err != nil {
+						return operationError("replace compressed context", err)
+					}
 				}
 			}
 
@@ -944,15 +981,16 @@ func (a *Agent) Do(
 			if reasoningContent != "" {
 				finalMessage.ContentBlocks = append([]*schema.ContentBlock{common.ReasoningBlock(reasoningContent)}, finalMessage.ContentBlocks...)
 			}
-			if err := commitConversationFinal(
+			if err := settleConversationFinal(
 				actx,
 				a.contextManager,
-				contextUID,
+				runSignature,
 				&messages,
 				finalMessage,
 			); err != nil {
-				return operationError("commit final answer", err)
+				return operationError("settle run", err)
 			}
+			runSettled = true
 
 			iterationsUsed++
 			if err := eventStream.WriteWithContext(actx, common.FinalAnswerCompletedEvent{Answer: finalAnswer}); err != nil {
@@ -972,6 +1010,34 @@ func (a *Agent) Do(
 	go func() {
 		defer eventStream.Close()
 		err := runLoop()
+
+		var settleErr error
+		if !runSettled {
+			outcome := contextmgr.RunOutcomeFailed
+			switch {
+			case errors.Is(err, errAgentLoopInterrupted):
+				outcome = contextmgr.RunOutcomeInterrupted
+			case actx.Err() != nil:
+				outcome = contextmgr.RunOutcomeCanceled
+			}
+			settleCtx, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), settleRunTimeout)
+			settleErr = a.contextManager.SettleRun(settleCtx, &contextmgr.SettleRunArgs{
+				Signature: runSignature,
+				Outcome:   outcome,
+			})
+			cancelSettle()
+		}
+		if settleErr != nil {
+			if err != nil {
+				logging.Errorf(
+					"Agent.Do: run stopped before it settled for %s/%s: %v",
+					runSignature.ContextUID,
+					runSignature.RunUID,
+					err,
+				)
+			}
+			err = operationError("settle run", settleErr)
+		}
 		usage := snapshotRunUsage(runUsage)
 
 		var terminal common.AgentEvent
@@ -988,7 +1054,7 @@ func (a *Agent) Do(
 				IterationsUsed: iterationsUsed,
 				Reason:         "tool requested loop interruption",
 			}
-		case actx.Err() != nil:
+		case actx.Err() != nil && settleErr == nil:
 			terminal = common.RunCanceledEvent{
 				Usage:          usage,
 				IterationsUsed: iterationsUsed,

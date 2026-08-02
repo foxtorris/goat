@@ -233,7 +233,11 @@ func OpenAIAgentInterruptTest() {
 	fmt.Printf("interrupt tool: %s\n", toolRequested.Name)
 	fmt.Printf("tool input: %+v\n", toolRequested.Arguments)
 	fmt.Printf("tool observation: %s\n", toolCompleted.Result)
-	fmt.Printf("context messages after interrupt: %d\n", manager.Len(ctx, signature.ContextUID))
+	messages, err := manager.Load(ctx, signature.ContextUID)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("context messages after interrupt: %d\n", len(messages))
 	fmt.Printf("usage: prompt=%d cached=%d completion=%d\n", usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 }
 

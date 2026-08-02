@@ -11,6 +11,7 @@ The current agent implementation lives in `react`. The model decides whether and
 - File, in-memory, SQLite, and MySQL conversation context manager backends.
 - Conversation continuation and persistent, protocol-safe steering through `ContextUID`.
 - Per-`Do` `RunSignature` values and hidden context boundaries for grouping retained messages by run.
+- Immutable terminal run snapshots and independent conversation branches through `Agent.Fork`.
 - Precise, aggressive, and selective-discard context compression strategies.
 - Task plan creation and updates, plus parallel execution of multiple tools.
 - Per-run skill loading from a configurable directory, propagated to tools through `AgentContext` metadata.
@@ -23,7 +24,7 @@ The current agent implementation lives in `react`. The model decides whether and
 ```text
 agent/
 ├── common/                  # Shared agent, message, tool, context, and configuration types
-│   ├── agent.go             # Agent, AgentDoArgs, and compression configuration
+│   ├── agent.go             # Agent, Do/Fork arguments, and compression configuration
 │   ├── agentic_message.go   # Text and image message constructors
 │   ├── ctx.go               # AgentContext with concurrency-safe metadata
 │   ├── context_uid.go       # ContextUID conversation identifier
@@ -32,7 +33,7 @@ agent/
 │   ├── mcp_tool.go          # MCP Tool to common.Tool adapter
 │   └── tool.go              # Tool, ToolResult, and JSON Schema helpers
 ├── contextmgr/
-│   ├── context_manager.go   # ContextManager interface
+│   ├── context_manager.go   # Manager state machine and four-method Store contract
 │   ├── file/                # File storage; defaults to data/conversations
 │   ├── mysql/               # MySQL storage
 │   ├── ram/                 # In-process storage
@@ -141,11 +142,38 @@ func main() {
 The explicit user message for every successful `Do` stores its `RunUID` under `common.RunUIDExtraKey` in `AgenticMessage.Extra`. This metadata is persisted by every context-manager backend, is not added to model-visible text, and survives context compression because user inputs are protected. Use `common.RunUIDFromMessage` for individual boundaries or split retained history directly:
 
 ```go
-messages := manager.GetAll(ctx, signature.ContextUID)
+messages, err := manager.Load(ctx, signature.ContextUID)
+if err != nil {
+	log.Fatal(err)
+}
 preamble, runs := common.SplitMessagesByRun(signature.ContextUID, messages)
 ```
 
 `preamble` contains the system prompt and any legacy messages stored before run markers were introduced. Each `RunMessages` segment begins with one explicitly submitted `Do` user message and continues up to the next run boundary. Steering messages have no boundary of their own and remain in the surrounding run. Compression can replace detailed tool-process messages with cross-run artifacts, so these segments describe retained logical context rather than an immutable audit log.
+
+## Forking a settled run
+
+Drain the event stream through its terminal event and `streaming.ErrStreamClosed`, then pass the returned `RunSignature` to `Fork`:
+
+```go
+forkedContextUID, err := agent.Fork(ctx, &common.AgentForkArgs{
+	From: signature,
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+branchSignature, branchEvents, err := agent.Do(ctx, &common.AgentDoArgs{
+	ContextUID: forkedContextUID,
+	UserInput:  common.AgentUserInput{Text: "Take a different approach from here."},
+})
+```
+
+`Fork` is inclusive: the new conversation contains committed history through the selected run. It does not start the agent loop and therefore returns only a new `ContextUID`; the next `Do` creates the first branch-specific `RunUID`. The source remains unchanged, and pending steering messages are not copied. Historical run markers and their snapshots are inherited, so a branch can be forked again at any inherited run that has a snapshot.
+
+The React agent settles a run snapshot before emitting `RunCompletedEvent`, `RunInterruptedEvent`, `RunCanceledEvent`, or a run-failure terminal event. Calling `Fork` before that point returns an error wrapping `contextmgr.ErrRunNotSettled`. Missing contexts and unknown runs wrap `ErrContextNotFound` and `ErrRunNotFound`. All validation errors remain compatible with `errors.Is` through the Agent-level wrapper. If settlement persistence fails, the terminal event is `RunFailedEvent` with operation `settle run`, and that run is not forkable.
+
+Snapshots preserve the exact retained context at the terminal boundary and are isolated from later `Replace` calls made by compression. They are not an uncompressed audit log: if the selected run had already compressed older tool-process messages, its snapshot contains that checkpoint or summary. Each settled run stores a full context snapshot; persistent deployments should account for that storage growth. `Delete` removes the complete versioned state for a context.
 
 ## Steering a running conversation
 
@@ -252,28 +280,27 @@ Available strategies:
 
 ## Conversation context management
 
-Every backend implements `contextmgr.ContextManager`:
+Conversation behavior is centralized in `contextmgr.Manager`. Persistence backends implement only this interface:
 
 ```go
-type TurnCommitResult struct {
-	AppliedPendingMessages []*schema.AgenticMessage
-}
-
-type ContextManager interface {
-	InitNew(context.Context) common.ContextUID
-	NewContextUID(context.Context) common.ContextUID
-	Append(context.Context, common.ContextUID, *schema.AgenticMessage) error
-	GetAll(context.Context, common.ContextUID) []*schema.AgenticMessage
-	Len(context.Context, common.ContextUID) int
-	Reset(context.Context, common.ContextUID, []*schema.AgenticMessage)
-	EnqueuePendingMessages(context.Context, common.ContextUID, []*schema.AgenticMessage) error
-	CommitTurn(context.Context, common.ContextUID, []*schema.AgenticMessage) (*TurnCommitResult, error)
-	CommitFinal(context.Context, common.ContextUID, *schema.AgenticMessage) error
+type Store interface {
+	Create(context.Context, *State) (common.ContextUID, error)
+	Load(context.Context, common.ContextUID) (*State, error)
+	CompareAndSwap(context.Context, common.ContextUID, uint64, *State) error
 	Delete(context.Context, common.ContextUID) error
 }
 ```
 
-`EnqueuePendingMessages` stores only user-role messages outside committed history. `CommitTurn` atomically appends a complete non-final turn and then moves all currently pending messages behind it, preserving order. `CommitFinal` atomically appends the final assistant answer and discards pending messages; further enqueue attempts return `ErrConversationFinalized` until a new user input is appended. `Reset` replaces committed history during compression but leaves the pending inbox untouched.
+`State` contains one revision, committed messages, the pending steering inbox, and immutable run snapshots. A Store must return clones at its boundary, create revision `1`, and make `CompareAndSwap` replace the complete state only when the persisted revision equals the supplied revision. A successful CAS stores the next revision; a mismatch returns `ErrRevisionConflict`, while an unknown ID returns `ErrContextNotFound`. `Manager` retries revision conflicts, so concurrent steering and turn commits do not lose updates.
+
+The Manager surface is intentionally concrete and small enough to read by workflow:
+
+- `Create`, `Load`, `Append`, `Replace`, and `Delete` manage committed history. `Replace` preserves pending messages and run snapshots.
+- `Enqueue` accepts only user messages. `CommitTurn` atomically appends a protocol-complete non-final turn and then applies every pending message in order.
+- `SettleRun` atomically records the terminal outcome and snapshot. For `completed`, it also appends the final assistant answer and clears pending messages in the same CAS. `interrupted`, `canceled`, and `failed` preserve pending messages for the next run. Repeating a settled signature is idempotent.
+- `Fork` creates a new conversation from a settled snapshot, excludes pending messages, and retains inherited historical fork points.
+
+Application code normally calls `Agent.Do`, `Agent.Steer`, and `Agent.Fork`; Agent implementations use the Manager transition methods. Custom persistence code should not reproduce those transitions.
 
 ### Choosing a backend
 
@@ -291,7 +318,9 @@ manager, err := sqlite.NewSQLiteContextManager("")
 manager, err := mysql.NewMysqlContextManager("127.0.0.1", 3306, "user", "password", "goat")
 ```
 
-`react.NewAgent(llm, modelMaxTokensK, nil)` uses `file.FileContextManager` by default.
+`react.NewAgent(llm, modelMaxTokensK, nil)` uses a Manager over `file.FileStore` by default.
+
+SQLite and MySQL store the complete state payload and revision in `goat_context_conversations`. Their constructors add these columns automatically. Existing v0.2 rows with an empty payload are read from the legacy message, pending-message, and run-snapshot tables; the first successful CAS upgrades that context to the new payload without requiring an offline migration. The File Store keeps format version `1` and treats files without a revision as revision `1`.
 
 ### Continuing a conversation
 

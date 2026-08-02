@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/agent/contextmgr"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/streaming"
 
@@ -22,6 +23,41 @@ type scriptedEventModel struct {
 	responses [][]*schema.AgenticMessage
 	inputs    [][]*schema.AgenticMessage
 	streamErr error
+}
+
+type failingSettleStore struct {
+	delegate contextmgr.Store
+	err      error
+}
+
+func (s *failingSettleStore) Create(
+	ctx context.Context,
+	state *contextmgr.State,
+) (common.ContextUID, error) {
+	return s.delegate.Create(ctx, state)
+}
+
+func (s *failingSettleStore) Load(
+	ctx context.Context,
+	contextUID common.ContextUID,
+) (*contextmgr.State, error) {
+	return s.delegate.Load(ctx, contextUID)
+}
+
+func (s *failingSettleStore) CompareAndSwap(
+	ctx context.Context,
+	contextUID common.ContextUID,
+	expectedRevision uint64,
+	state *contextmgr.State,
+) error {
+	if len(state.RunSnapshots) > 0 {
+		return s.err
+	}
+	return s.delegate.CompareAndSwap(ctx, contextUID, expectedRevision, state)
+}
+
+func (s *failingSettleStore) Delete(ctx context.Context, contextUID common.ContextUID) error {
+	return s.delegate.Delete(ctx, contextUID)
 }
 
 func (m *scriptedEventModel) Generate(
@@ -56,7 +92,8 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 	defer cancel()
 
 	answer := messageWithUsage(common.AssistantTextMessage("done"), 7, 2, 3)
-	manager := ram.NewRAMContextManager()
+	store := ram.NewRAMStore()
+	manager := contextmgr.NewManager(store)
 	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{answer}}}, 128, manager)
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "answer directly"},
@@ -84,7 +121,7 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 	if started.Signature != signature {
 		t.Fatalf("run started signature = %+v, want %+v", started.Signature, signature)
 	}
-	history := manager.GetAll(ctx, signature.ContextUID)
+	history := mustLoadHistory(t, ctx, manager, signature.ContextUID)
 	if len(history) != 3 {
 		t.Fatalf("history count = %d, want system, user, final", len(history))
 	}
@@ -100,6 +137,7 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 	if completed.IterationsUsed != 1 || completed.ToolCalls != 0 {
 		t.Fatalf("run completed = %+v", completed)
 	}
+	assertRunOutcome(t, ctx, store, signature, contextmgr.RunOutcomeCompleted)
 }
 
 func TestDoCreatesDistinctRunSignaturesWithinOneConversation(t *testing.T) {
@@ -132,7 +170,7 @@ func TestDoCreatesDistinctRunSignaturesWithinOneConversation(t *testing.T) {
 	if first.ContextUID != second.ContextUID || first.RunUID == second.RunUID {
 		t.Fatalf("run signatures = first %+v, second %+v", first, second)
 	}
-	preamble, runs := common.SplitMessagesByRun(first.ContextUID, manager.GetAll(ctx, first.ContextUID))
+	preamble, runs := common.SplitMessagesByRun(first.ContextUID, mustLoadHistory(t, ctx, manager, first.ContextUID))
 	if len(preamble) != 1 || len(runs) != 2 {
 		t.Fatalf("split history = %d preamble messages, %d runs", len(preamble), len(runs))
 	}
@@ -141,12 +179,91 @@ func TestDoCreatesDistinctRunSignaturesWithinOneConversation(t *testing.T) {
 	}
 }
 
+func TestForkCreatesIndependentConversationAtSettledRun(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	manager := ram.NewRAMContextManager()
+	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{
+		{common.AssistantTextMessage("first answer")},
+		{common.AssistantTextMessage("second answer")},
+		{common.AssistantTextMessage("branch answer")},
+	}}, 128, manager)
+
+	first, firstEvents, err := agent.Do(ctx, &common.AgentDoArgs{
+		UserInput: common.AgentUserInput{Text: "first request"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readAllEvents(t, ctx, firstEvents)
+
+	second, secondEvents, err := agent.Do(ctx, &common.AgentDoArgs{
+		ContextUID: first.ContextUID,
+		UserInput:  common.AgentUserInput{Text: "second request"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readAllEvents(t, ctx, secondEvents)
+
+	forkedContextUID, err := agent.Fork(ctx, &common.AgentForkArgs{From: first})
+	if err != nil {
+		t.Fatalf("Fork(first) error = %v", err)
+	}
+	if forkedContextUID == "" || forkedContextUID == first.ContextUID {
+		t.Fatalf("forked context UID = %q", forkedContextUID)
+	}
+	_, forkedRuns := common.SplitMessagesByRun(forkedContextUID, mustLoadHistory(t, ctx, manager, forkedContextUID))
+	if len(forkedRuns) != 1 || forkedRuns[0].Signature.RunUID != first.RunUID {
+		t.Fatalf("forked runs = %+v, want only %s", forkedRuns, first.RunUID)
+	}
+
+	branch, branchEvents, err := agent.Do(ctx, &common.AgentDoArgs{
+		ContextUID: forkedContextUID,
+		UserInput:  common.AgentUserInput{Text: "branch request"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readAllEvents(t, ctx, branchEvents)
+	if branch.ContextUID != forkedContextUID || branch.RunUID == first.RunUID || branch.RunUID == second.RunUID {
+		t.Fatalf("branch signature = %+v", branch)
+	}
+
+	_, sourceRuns := common.SplitMessagesByRun(first.ContextUID, mustLoadHistory(t, ctx, manager, first.ContextUID))
+	_, branchRuns := common.SplitMessagesByRun(forkedContextUID, mustLoadHistory(t, ctx, manager, forkedContextUID))
+	if len(sourceRuns) != 2 || sourceRuns[1].Signature != second {
+		t.Fatalf("source runs changed after branch = %+v", sourceRuns)
+	}
+	if len(branchRuns) != 2 || branchRuns[1].Signature != branch {
+		t.Fatalf("branch runs = %+v", branchRuns)
+	}
+}
+
+func TestForkValidatesArguments(t *testing.T) {
+	agent := NewAgent(&scriptedEventModel{}, 128, ram.NewRAMContextManager())
+	ctx := context.Background()
+
+	if _, err := agent.Fork(ctx, nil); err == nil || !strings.Contains(err.Error(), "args is nil") {
+		t.Fatalf("Fork(nil) error = %v", err)
+	}
+	if _, err := agent.Fork(ctx, &common.AgentForkArgs{}); !errors.Is(err, contextmgr.ErrInvalidRunSignature) || !strings.Contains(err.Error(), "context UID is empty") {
+		t.Fatalf("Fork(empty context) error = %v", err)
+	}
+	if _, err := agent.Fork(ctx, &common.AgentForkArgs{From: common.RunSignature{ContextUID: "context"}}); !errors.Is(err, contextmgr.ErrInvalidRunSignature) || !strings.Contains(err.Error(), "run UID is empty") {
+		t.Fatalf("Fork(empty run) error = %v", err)
+	}
+}
+
 func TestDoEmitsRunFailedForBackgroundModelError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	agent := NewAgent(&scriptedEventModel{streamErr: errors.New("provider unavailable")}, 128, ram.NewRAMContextManager())
-	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	store := ram.NewRAMStore()
+	manager := contextmgr.NewManager(store)
+	agent := NewAgent(&scriptedEventModel{streamErr: errors.New("provider unavailable")}, 128, manager)
+	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "fail"},
 	})
 	if err != nil {
@@ -165,6 +282,51 @@ func TestDoEmitsRunFailedForBackgroundModelError(t *testing.T) {
 	failed, ok := terminals[0].(common.RunFailedEvent)
 	if !ok || failed.Operation != "think" || !containsAll(failed.Error, "think model call", "provider unavailable") {
 		t.Fatalf("run failure = %+v", terminals[0])
+	}
+	forkedContextUID, err := agent.Fork(ctx, &common.AgentForkArgs{From: signature})
+	if err != nil {
+		t.Fatalf("Fork(failed run) error = %v", err)
+	}
+	if got := len(mustLoadHistory(t, ctx, manager, forkedContextUID)); got != 2 {
+		t.Fatalf("failed-run fork message count = %d, want system and user", got)
+	}
+	assertRunOutcome(t, ctx, store, signature, contextmgr.RunOutcomeFailed)
+}
+
+func TestDoReportsSettleFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	store := &failingSettleStore{
+		delegate: ram.NewRAMStore(),
+		err:      errors.New("state storage unavailable"),
+	}
+	manager := contextmgr.NewManager(store)
+	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{
+		common.AssistantTextMessage("answer"),
+	}}}, 128, manager)
+	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+		UserInput: common.AgentUserInput{Text: "request"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := readAllEvents(t, ctx, eventStream)
+
+	terminals := terminalEvents(events)
+	if len(terminals) != 1 {
+		t.Fatalf("terminal events = %+v", terminals)
+	}
+	failed, ok := terminals[0].(common.RunFailedEvent)
+	if !ok || failed.Operation != "settle run" || !strings.Contains(failed.Error, "state storage unavailable") {
+		t.Fatalf("run settlement failure = %+v", terminals[0])
+	}
+	if _, err := agent.Fork(ctx, &common.AgentForkArgs{From: signature}); !errors.Is(err, contextmgr.ErrRunNotSettled) {
+		t.Fatalf("Fork(unsettled run) error = %v, want ErrRunNotSettled", err)
+	}
+	history := mustLoadHistory(t, ctx, manager, signature.ContextUID)
+	if len(history) != 2 {
+		t.Fatalf("failed settlement partially committed final answer: %d messages", len(history))
 	}
 }
 
@@ -259,7 +421,8 @@ func TestDoEmitsInterruptedAfterWrappedTool(t *testing.T) {
 	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{assistantToolCalls(
 		&schema.FunctionToolCall{CallID: "approval-call", Name: "approval", Arguments: `{}`},
 	)}}}
-	agent := NewAgent(llm, 128, ram.NewRAMContextManager())
+	store := ram.NewRAMStore()
+	agent := NewAgent(llm, 128, contextmgr.NewManager(store))
 	agent.AddTool(ctx, common.InterruptLoopAfter(common.NewDefaultTool(
 		"approval",
 		"pause the run",
@@ -269,7 +432,7 @@ func TestDoEmitsInterruptedAfterWrappedTool(t *testing.T) {
 		},
 	)))
 
-	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{UserInput: common.AgentUserInput{Text: "pause"}})
+	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{UserInput: common.AgentUserInput{Text: "pause"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,6 +447,10 @@ func TestDoEmitsInterruptedAfterWrappedTool(t *testing.T) {
 	if len(terminals) != 1 || terminals[0].Type() != common.AgentEventTypeRunInterrupted {
 		t.Fatalf("terminal events = %+v", terminals)
 	}
+	if _, err := agent.Fork(ctx, &common.AgentForkArgs{From: signature}); err != nil {
+		t.Fatalf("Fork(interrupted run) error = %v", err)
+	}
+	assertRunOutcome(t, ctx, store, signature, contextmgr.RunOutcomeInterrupted)
 }
 
 func TestDoEmitsCanceledTerminalAfterContextCancellation(t *testing.T) {
@@ -295,7 +462,8 @@ func TestDoEmitsCanceledTerminalAfterContextCancellation(t *testing.T) {
 	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{assistantToolCalls(
 		&schema.FunctionToolCall{CallID: "blocking-call", Name: "blocking", Arguments: `{}`},
 	)}}}
-	agent := NewAgent(llm, 128, ram.NewRAMContextManager())
+	store := ram.NewRAMStore()
+	agent := NewAgent(llm, 128, contextmgr.NewManager(store))
 	agent.AddTool(baseCtx, common.NewDefaultTool(
 		"blocking",
 		"wait for cancellation",
@@ -306,7 +474,7 @@ func TestDoEmitsCanceledTerminalAfterContextCancellation(t *testing.T) {
 		},
 	))
 
-	_, eventStream, err := agent.Do(runCtx, &common.AgentDoArgs{
+	signature, eventStream, err := agent.Do(runCtx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "wait"},
 	})
 	if err != nil {
@@ -336,6 +504,10 @@ func TestDoEmitsCanceledTerminalAfterContextCancellation(t *testing.T) {
 	if !ok || canceled.Reason != context.Canceled.Error() {
 		t.Fatalf("run canceled event = %+v", terminals[0])
 	}
+	if _, err := agent.Fork(baseCtx, &common.AgentForkArgs{From: signature}); err != nil {
+		t.Fatalf("Fork(canceled run) error = %v", err)
+	}
+	assertRunOutcome(t, baseCtx, store, signature, contextmgr.RunOutcomeCanceled)
 }
 
 func TestDoTurnsNilToolResultIntoFailureEvent(t *testing.T) {
@@ -377,6 +549,38 @@ func TestDoTurnsNilToolResultIntoFailureEvent(t *testing.T) {
 	llm.mu.Unlock()
 	if !messageInputContains(secondInput, "Error: tool returned a nil result") {
 		t.Fatalf("second model input does not contain the tool failure: %+v", secondInput)
+	}
+}
+
+func mustLoadHistory(
+	t *testing.T,
+	ctx context.Context,
+	manager *contextmgr.Manager,
+	contextUID common.ContextUID,
+) []*schema.AgenticMessage {
+	t.Helper()
+	messages, err := manager.Load(ctx, contextUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return messages
+}
+
+func assertRunOutcome(
+	t *testing.T,
+	ctx context.Context,
+	store contextmgr.Store,
+	signature common.RunSignature,
+	want contextmgr.RunOutcome,
+) {
+	t.Helper()
+	state, err := store.Load(ctx, signature.ContextUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, exists := state.RunSnapshots[signature.RunUID]
+	if !exists || snapshot.Outcome != want {
+		t.Fatalf("run snapshot = %+v, exists %v, want outcome %q", snapshot, exists, want)
 	}
 }
 

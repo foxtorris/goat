@@ -102,7 +102,7 @@ func newModel(ctx context.Context, cfg config.Model) (model.AgenticModel, error)
 	}
 }
 
-func newContextManager(cfg config.Context) (contextmgr.ContextManager, error) {
+func newContextManager(cfg config.Context) (*contextmgr.Manager, error) {
 	switch strings.ToLower(cfg.Backend) {
 	case "ram":
 		return ram.NewRAMContextManager(), nil
