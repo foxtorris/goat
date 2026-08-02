@@ -56,8 +56,9 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 	defer cancel()
 
 	answer := messageWithUsage(common.AssistantTextMessage("done"), 7, 2, 3)
-	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{answer}}}, 128, ram.NewRAMContextManager())
-	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	manager := ram.NewRAMContextManager()
+	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{answer}}}, 128, manager)
+	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "answer directly"},
 	})
 	if err != nil {
@@ -76,6 +77,20 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 	if got := eventTypes(events); !reflect.DeepEqual(got, wantTypes) {
 		t.Fatalf("event types = %v, want %v", got, wantTypes)
 	}
+	if signature.IsZero() {
+		t.Fatal("Do() returned an empty run signature")
+	}
+	started := events[0].(common.RunStartedEvent)
+	if started.Signature != signature {
+		t.Fatalf("run started signature = %+v, want %+v", started.Signature, signature)
+	}
+	history := manager.GetAll(ctx, signature.ContextUID)
+	if len(history) != 3 {
+		t.Fatalf("history count = %d, want system, user, final", len(history))
+	}
+	if got, ok := common.RunUIDFromMessage(history[1]); !ok || got != signature.RunUID {
+		t.Fatalf("stored run boundary = %q, %v, want %q", got, ok, signature.RunUID)
+	}
 	completed := events[len(events)-1].(common.RunCompletedEvent)
 	if !reflect.DeepEqual(completed.Usage, &common.AgentUsage{
 		PromptTokens: 7, CachedTokens: 2, CompletionTokens: 3,
@@ -84,6 +99,45 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 	}
 	if completed.IterationsUsed != 1 || completed.ToolCalls != 0 {
 		t.Fatalf("run completed = %+v", completed)
+	}
+}
+
+func TestDoCreatesDistinctRunSignaturesWithinOneConversation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	manager := ram.NewRAMContextManager()
+	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{
+		{common.AssistantTextMessage("first answer")},
+		{common.AssistantTextMessage("second answer")},
+	}}, 128, manager)
+
+	first, firstEvents, err := agent.Do(ctx, &common.AgentDoArgs{
+		UserInput: common.AgentUserInput{Text: "first request"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readAllEvents(t, ctx, firstEvents)
+
+	second, secondEvents, err := agent.Do(ctx, &common.AgentDoArgs{
+		ContextUID: first.ContextUID,
+		UserInput:  common.AgentUserInput{Text: "second request"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readAllEvents(t, ctx, secondEvents)
+
+	if first.ContextUID != second.ContextUID || first.RunUID == second.RunUID {
+		t.Fatalf("run signatures = first %+v, second %+v", first, second)
+	}
+	preamble, runs := common.SplitMessagesByRun(first.ContextUID, manager.GetAll(ctx, first.ContextUID))
+	if len(preamble) != 1 || len(runs) != 2 {
+		t.Fatalf("split history = %d preamble messages, %d runs", len(preamble), len(runs))
+	}
+	if runs[0].Signature != first || runs[1].Signature != second {
+		t.Fatalf("split signatures = %+v, want %+v and %+v", runs, first, second)
 	}
 }
 

@@ -78,9 +78,9 @@ type ToolExecutionOptions struct {
 
 type Agent interface {
 	// Do stores the current user input, starts the agent loop asynchronously,
-	// and returns the context UID and the event stream for this run. The stream is
-	// closed when the run finishes, is interrupted, or stops with an error.
-	Do(context.Context, *AgentDoArgs, ...model.Option) (ContextUID, streaming.Stream[AgentEvent], error)
+	// and returns the conversation/run signature and the event stream. The stream
+	// is closed when the run finishes, is interrupted, or stops with an error.
+	Do(context.Context, *AgentDoArgs, ...model.Option) (RunSignature, streaming.Stream[AgentEvent], error)
 
 	// Steer queues one or more user messages for a conversation. Messages are
 	// committed after the next complete non-final turn. A final answer discards

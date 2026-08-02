@@ -13,14 +13,15 @@ import (
 )
 
 func (a *Agent) buildFinalAnswerWebhookPayload(
-	contextUID common.ContextUID,
+	signature common.RunSignature,
 	args *common.AgentDoArgs,
 	finalAnswer string,
 ) *common.FinalAnswerWebhookPayload {
 	return &common.FinalAnswerWebhookPayload{
 		Event:       "final_answer",
 		Agent:       "react",
-		ContextUID:  contextUID,
+		ContextUID:  signature.ContextUID,
+		RunUID:      signature.RunUID,
 		UserInput:   args.UserInput.Text,
 		FinalAnswer: finalAnswer,
 		GeneratedAt: time.Now().UTC(),

@@ -44,7 +44,7 @@ type model struct {
 }
 
 type runStartedMsg struct {
-	uid common.ContextUID
+	signature common.RunSignature
 }
 
 type answerChunkMsg string
@@ -146,7 +146,7 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(commands...)
 		}
 	case runStartedMsg:
-		m.contextUID = msg.uid
+		m.contextUID = msg.signature.ContextUID
 		commands = append(commands, m.waitForEvent())
 	case answerChunkMsg:
 		if !m.answerOpen {
@@ -235,7 +235,7 @@ func (m *model) startRun(runCtx context.Context, cancel context.CancelFunc, text
 		if parallel > 0 {
 			args.ToolExecutionOptions = &common.ToolExecutionOptions{EnableParallel: true, MaxConcurrency: parallel}
 		}
-		uid, events, err := m.agent.Do(runCtx, args)
+		signature, events, err := m.agent.Do(runCtx, args)
 		if err != nil {
 			cancel()
 			return runErrorMsg{err: err}
@@ -290,7 +290,7 @@ func (m *model) startRun(runCtx context.Context, cancel context.CancelFunc, text
 				}
 			}
 		}()
-		return runStartedMsg{uid: uid}
+		return runStartedMsg{signature: signature}
 	}
 }
 

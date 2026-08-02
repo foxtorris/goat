@@ -17,6 +17,7 @@ import (
 func TestCompressMessagesDiscardHalfOnlyDiscardsDetailedProcess(t *testing.T) {
 	systemMessage := schema.SystemAgenticMessage("system")
 	firstUserInput := schema.UserAgenticMessage("first question")
+	common.MarkRunStart(firstUserInput, "run-1")
 	oldToolCall := discardHalfToolCallMessage("search", "search-1")
 	oldToolResult := discardHalfToolResultMessage("search", "search-1", "old details")
 	loadSkillsCall := discardHalfToolCallMessage(tools.InternalToolLoadSkills, "skill-1")
@@ -29,6 +30,7 @@ func TestCompressMessagesDiscardHalfOnlyDiscardsDetailedProcess(t *testing.T) {
 	readSkillFileResult := discardHalfToolResultMessage("", "skill-file-1", "reference content")
 	firstFinalAnswer := common.AssistantTextMessage("first answer")
 	secondUserInput := schema.UserAgenticMessage("follow-up question")
+	common.MarkRunStart(secondUserInput, "run-2")
 	secondFinalAnswer := common.AssistantTextMessage("follow-up answer")
 
 	messages := []*schema.AgenticMessage{
@@ -86,6 +88,12 @@ func TestCompressMessagesDiscardHalfOnlyDiscardsDetailedProcess(t *testing.T) {
 			t.Errorf("compressMessagesDiscardHalf() message[%d] was not retained in order", index)
 		}
 	}
+	if got, ok := common.RunUIDFromMessage(compressed[1]); !ok || got != "run-1" {
+		t.Fatalf("first run boundary after compression = %q, %v", got, ok)
+	}
+	if got, ok := common.RunUIDFromMessage(compressed[len(compressed)-2]); !ok || got != "run-2" {
+		t.Fatalf("second run boundary after compression = %q, %v", got, ok)
+	}
 }
 
 func TestCompressMessagesDiscardHalfDoesNothingWithoutDetailedProcess(t *testing.T) {
@@ -141,6 +149,7 @@ func TestModelBasedCompressionStrategiesPreserveProtectedMessages(t *testing.T) 
 		t.Run(test.name, func(t *testing.T) {
 			systemMessage := schema.SystemAgenticMessage("system")
 			userInput := schema.UserAgenticMessage("KEEP_USER_INPUT")
+			common.MarkRunStart(userInput, "preserved-run")
 			oldToolCall := discardHalfToolCallMessage("search", "search-old")
 			oldToolResult := discardHalfToolResultMessage("search", "search-old", "COMPRESS_OLD_TOOL_RESULT")
 			loadSkillsCall := discardHalfToolCallMessage(tools.InternalToolLoadSkills, "skill-1")
@@ -213,6 +222,9 @@ func TestModelBasedCompressionStrategiesPreserveProtectedMessages(t *testing.T) 
 				if compressed[index+2] != message {
 					t.Errorf("compressMessages() protected message[%d] was not retained in order", index)
 				}
+			}
+			if got, ok := common.RunUIDFromMessage(compressed[2]); !ok || got != "preserved-run" {
+				t.Fatalf("run boundary after %s compression = %q, %v", test.name, got, ok)
 			}
 
 			compressionInput := llm.inputText()

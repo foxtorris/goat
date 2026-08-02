@@ -61,7 +61,7 @@ func main() {
 
 	fmt.Printf("Model: %s\nQuestion: %s\n\n", envOr("OPENAI_MODEL", "gpt-5.2"), *question)
 
-	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: *question},
 		ContextMeta: map[common.AgentDoMetaKey]any{
 			regionMetaKey: "eu-west",
@@ -127,7 +127,8 @@ func main() {
 	if finalStarted {
 		fmt.Println()
 	}
-	fmt.Printf("\nConversation: %s\n", contextUID)
+	fmt.Printf("\nConversation: %s\n", signature.ContextUID)
+	fmt.Printf("Run: %s\n", signature.RunUID)
 	fmt.Printf("Tool calls: %d\n", toolCalls)
 	fmt.Printf("Token usage: prompt=%d cached=%d completion=%d\n", usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 }

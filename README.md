@@ -254,7 +254,7 @@ func main() {
 	// 128 means an approximately 128K-token model context window.
 	agent := react.NewAgent(llm, 128, ram.NewRAMContextManager())
 
-	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{
 			Text: "Explain why typed streams are useful in Go in three bullets.",
 		},
@@ -289,19 +289,20 @@ func main() {
 	if usage == nil {
 		usage = &common.AgentUsage{}
 	}
-	fmt.Printf("\nConversation: %s\n", contextUID)
+	fmt.Printf("\nConversation: %s\n", signature.ContextUID)
+	fmt.Printf("Run: %s\n", signature.RunUID)
 	fmt.Printf("Tokens: prompt=%d cached=%d completion=%d\n",
 		usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 }
 ```
 
-`Agent.Do` stores the user message, starts the agent loop in the background, and immediately returns a `ContextUID` plus a `common.AgentEvent` stream for that run. Stream items are concrete event values, so consumers handle them directly with a type switch. Drain the stream through its single terminal event and `streaming.ErrStreamClosed` before starting another turn with the same `ContextUID`.
+`Agent.Do` stores the user message, starts the agent loop in the background, and immediately returns a `RunSignature` plus a `common.AgentEvent` stream. The signature contains the persistent conversation `ContextUID` and a new `RunUID` for this invocation. Stream items are concrete event values, so consumers handle them directly with a type switch. Drain the stream through its single terminal event and `streaming.ErrStreamClosed` before starting another turn with the same `ContextUID`.
 
 While the run is active, queue additional user messages with `Steer`:
 
 ```go
 err = agent.Steer(ctx, &common.AgentSteerArgs{
-	ContextUID: contextUID,
+	ContextUID: signature.ContextUID,
 	UserInputs: []common.AgentUserInput{
 		{Text: "Do not deploy yet."},
 		{Text: "Run all tests first."},
@@ -377,10 +378,12 @@ Continue a completed conversation by passing the returned ID into the next run:
 
 ```go
 _, nextSteps, err := agent.Do(ctx, &common.AgentDoArgs{
-	ContextUID: contextUID,
+	ContextUID: signature.ContextUID,
 	UserInput: common.AgentUserInput{Text: "Summarize our conversation."},
 })
 ```
+
+Each explicit `Do` user message stores its `RunUID` in `AgenticMessage.Extra`. Use `common.SplitMessagesByRun` to partition retained context into legacy/global preamble messages and per-run segments without adding model-visible marker text.
 
 ## Retrieval
 

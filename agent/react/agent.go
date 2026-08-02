@@ -517,10 +517,10 @@ func (a *Agent) Do(
 	ctx context.Context,
 	args *common.AgentDoArgs,
 	opts ...model.Option,
-) (common.ContextUID, streaming.Stream[common.AgentEvent], error) {
+) (common.RunSignature, streaming.Stream[common.AgentEvent], error) {
 	args = cloneAgentDoArgs(args)
 	if args == nil {
-		return "", nil, fmt.Errorf("agent do args is nil")
+		return common.RunSignature{}, nil, fmt.Errorf("agent do args is nil")
 	}
 
 	actx := common.NewAgentContext(ctx)
@@ -558,7 +558,7 @@ func (a *Agent) Do(
 		systemMessage := schema.SystemAgenticMessage(systemPrompt)
 		messages = []*schema.AgenticMessage{systemMessage}
 		if err := a.contextManager.Append(ctx, contextUID, systemMessage); err != nil {
-			return "", nil, fmt.Errorf("failed to store system message: %w", err)
+			return common.RunSignature{}, nil, fmt.Errorf("failed to store system message: %w", err)
 		}
 	} else {
 		// Continue existing conversation
@@ -570,7 +570,7 @@ func (a *Agent) Do(
 			systemMessage := schema.SystemAgenticMessage(systemPrompt)
 			messages = []*schema.AgenticMessage{systemMessage}
 			if err := a.contextManager.Append(ctx, contextUID, systemMessage); err != nil {
-				return "", nil, fmt.Errorf("failed to store system message: %w", err)
+				return common.RunSignature{}, nil, fmt.Errorf("failed to store system message: %w", err)
 			}
 			logging.Infof("Agent.Do: initialized empty conversation %s", contextUID)
 		} else {
@@ -591,6 +591,12 @@ func (a *Agent) Do(
 			logging.Infof("Agent.Do: Restored %d messages from conversation %s", len(messages), contextUID)
 		}
 	}
+	runSignature := common.RunSignature{
+		ContextUID: contextUID,
+		RunUID:     common.NewRunUID(),
+	}
+	actx.SetMeta(common.InternalToolContextUIDMetaKey, runSignature.ContextUID.String())
+	actx.SetMeta(common.InternalToolRunUIDMetaKey, runSignature.RunUID.String())
 
 	// Apply steering messages left by an interrupted or canceled run before
 	// storing this run's explicit user input.
@@ -601,7 +607,7 @@ func (a *Agent) Do(
 		&messages,
 	)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to apply pending steering messages: %w", err)
+		return common.RunSignature{}, nil, fmt.Errorf("failed to apply pending steering messages: %w", err)
 	}
 	if len(appliedBeforeRun) > 0 {
 		logging.Infof(
@@ -614,8 +620,9 @@ func (a *Agent) Do(
 	// Store this run's user input after any steering messages left by the
 	// previous run.
 	userMessage := userInputMessage(args.UserInput)
+	common.MarkRunStart(userMessage, runSignature.RunUID)
 	if err := appendConversationMessage(ctx, a.contextManager, contextUID, &messages, userMessage); err != nil {
-		return "", nil, fmt.Errorf("failed to store user message: %w", err)
+		return common.RunSignature{}, nil, fmt.Errorf("failed to store user message: %w", err)
 	}
 
 	callOpts := append([]model.Option{}, opts...)
@@ -625,14 +632,17 @@ func (a *Agent) Do(
 	}
 
 	eventStream := streaming.NewStream[common.AgentEvent](64)
-	if err := eventStream.WriteWithContext(ctx, common.RunStartedEvent{MaxStep: maxStep}); err != nil {
+	if err := eventStream.WriteWithContext(ctx, common.RunStartedEvent{
+		Signature: runSignature,
+		MaxStep:   maxStep,
+	}); err != nil {
 		_ = eventStream.Close()
-		return "", nil, fmt.Errorf("write run started event: %w", err)
+		return common.RunSignature{}, nil, fmt.Errorf("write run started event: %w", err)
 	}
 	if len(appliedBeforeRun) > 0 {
 		if err := eventStream.WriteWithContext(ctx, common.SteeringAppliedEvent{Count: len(appliedBeforeRun)}); err != nil {
 			_ = eventStream.Close()
-			return "", nil, fmt.Errorf("write steering applied event: %w", err)
+			return common.RunSignature{}, nil, fmt.Errorf("write steering applied event: %w", err)
 		}
 	}
 
@@ -673,7 +683,7 @@ func (a *Agent) Do(
 			a.sendFinalAnswerWebhook(
 				actx,
 				args.FinalAnswerWebhook,
-				a.buildFinalAnswerWebhookPayload(contextUID, args, finalAnswer),
+				a.buildFinalAnswerWebhookPayload(runSignature, args, finalAnswer),
 			)
 
 			return nil
@@ -952,7 +962,7 @@ func (a *Agent) Do(
 			a.sendFinalAnswerWebhook(
 				actx,
 				args.FinalAnswerWebhook,
-				a.buildFinalAnswerWebhookPayload(contextUID, args, finalAnswer),
+				a.buildFinalAnswerWebhookPayload(runSignature, args, finalAnswer),
 			)
 
 			return nil
@@ -1004,5 +1014,5 @@ func (a *Agent) Do(
 		}
 	}()
 
-	return contextUID, eventStream, nil
+	return runSignature, eventStream, nil
 }

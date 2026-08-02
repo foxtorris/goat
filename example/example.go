@@ -112,7 +112,7 @@ func AzureOpenAITest() {
 		panic(err)
 	}
 	agent := react.NewAgent(llm, 128, manager)
-	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "Say hello in one sentence."},
 		MaxStep:   4,
 	})
@@ -137,7 +137,8 @@ func AzureOpenAITest() {
 		usage = &common.AgentUsage{}
 	}
 
-	fmt.Println("conversation:", contextUID)
+	fmt.Println("conversation:", signature.ContextUID)
+	fmt.Println("run:", signature.RunUID)
 	fmt.Printf("usage: prompt=%d cached=%d completion=%d\n", usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 }
 
@@ -173,7 +174,7 @@ func OpenAIAgentInterruptTest() {
 	)
 	agent.AddTool(ctx, common.InterruptLoopAfter(approvalTool))
 
-	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{
 			Text: "Before doing anything else, request human approval for deploying to production. Use the request_human_approval tool and then wait.",
 		},
@@ -227,11 +228,12 @@ func OpenAIAgentInterruptTest() {
 		usage = &common.AgentUsage{}
 	}
 
-	fmt.Println("conversation:", contextUID)
+	fmt.Println("conversation:", signature.ContextUID)
+	fmt.Println("run:", signature.RunUID)
 	fmt.Printf("interrupt tool: %s\n", toolRequested.Name)
 	fmt.Printf("tool input: %+v\n", toolRequested.Arguments)
 	fmt.Printf("tool observation: %s\n", toolCompleted.Result)
-	fmt.Printf("context messages after interrupt: %d\n", manager.Len(ctx, contextUID))
+	fmt.Printf("context messages after interrupt: %d\n", manager.Len(ctx, signature.ContextUID))
 	fmt.Printf("usage: prompt=%d cached=%d completion=%d\n", usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 }
 

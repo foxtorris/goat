@@ -8,9 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** `common.Agent.Do` now returns `common.RunSignature` instead of `common.ContextUID`. The signature contains the persistent conversation ID and a unique ID for that invocation.
 - **Breaking:** `common.Agent.Do` now returns `streaming.Stream[common.AgentEvent]` while preserving its existing method shape. Concrete lifecycle, model, compression, tool, steering, final-answer, and terminal events replace the former `common.Step` stream.
 - Model thinking and final-answer generation now stream text through `AssistantTextDeltaEvent`; terminal events expose aggregate run usage and asynchronous failure, cancellation, or interruption state.
 - Parallel tool completion events now arrive in actual completion order while tool results passed back to the model retain request order.
+
+### Added
+
+- Explicit `Do` user messages carry a hidden `RunUID` context boundary, with helpers for extracting boundaries and grouping retained conversation messages by run.
+- `RunStartedEvent`, tool context metadata, and final-answer webhooks expose the current run signature or `RunUID` for correlation.
 
 ### Removed
 

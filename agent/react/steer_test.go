@@ -87,7 +87,7 @@ func TestFinalAnswerDiscardsPendingSteeringAndClosesInbox(t *testing.T) {
 	manager := ram.NewRAMContextManager()
 	agent := NewAgent(llm, 128, manager)
 
-	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "original request"},
 		MaxStep:   4,
 	})
@@ -104,7 +104,7 @@ func TestFinalAnswerDiscardsPendingSteeringAndClosesInbox(t *testing.T) {
 	// The call succeeds because no final answer has been committed yet. The
 	// pending messages are discarded when the final answer wins the boundary.
 	if err := agent.Steer(ctx, &common.AgentSteerArgs{
-		ContextUID: contextUID,
+		ContextUID: signature.ContextUID,
 		UserInputs: []common.AgentUserInput{
 			{Text: "ignored steer one"},
 			{Text: "ignored steer two"},
@@ -127,7 +127,7 @@ func TestFinalAnswerDiscardsPendingSteeringAndClosesInbox(t *testing.T) {
 		t.Fatalf("model call count = %d, want 1", got)
 	}
 
-	history := manager.GetAll(ctx, contextUID)
+	history := manager.GetAll(ctx, signature.ContextUID)
 	if len(history) != 3 {
 		t.Fatalf("history count = %d, want system, user, final", len(history))
 	}
@@ -136,7 +136,7 @@ func TestFinalAnswerDiscardsPendingSteeringAndClosesInbox(t *testing.T) {
 	}
 
 	if err := agent.Steer(ctx, &common.AgentSteerArgs{
-		ContextUID: contextUID,
+		ContextUID: signature.ContextUID,
 		UserInputs: []common.AgentUserInput{{Text: "too late"}},
 	}); !errors.Is(err, contextmgr.ErrConversationFinalized) {
 		t.Fatalf("Steer after final error = %v, want ErrConversationFinalized", err)
@@ -171,7 +171,7 @@ func TestSteerIsAppliedAfterCompleteToolTurn(t *testing.T) {
 		},
 	))
 
-	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "use the tool"},
 		MaxStep:   4,
 	})
@@ -185,7 +185,7 @@ func TestSteerIsAppliedAfterCompleteToolTurn(t *testing.T) {
 		t.Fatalf("first Think did not start: %v", ctx.Err())
 	}
 	if err := agent.Steer(ctx, &common.AgentSteerArgs{
-		ContextUID: contextUID,
+		ContextUID: signature.ContextUID,
 		UserInputs: []common.AgentUserInput{
 			{Text: "steer one"},
 			{Text: "steer two"},

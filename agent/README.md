@@ -10,6 +10,7 @@ The current agent implementation lives in `react`. The model decides whether and
 - Compatibility with OpenAI, Claude, Gemini, and any other model that implements Eino's `model.AgenticModel`.
 - File, in-memory, SQLite, and MySQL conversation context manager backends.
 - Conversation continuation and persistent, protocol-safe steering through `ContextUID`.
+- Per-`Do` `RunSignature` values and hidden context boundaries for grouping retained messages by run.
 - Precise, aggressive, and selective-discard context compression strategies.
 - Task plan creation and updates, plus parallel execution of multiple tools.
 - Per-run skill loading from a configurable directory, propagated to tools through `AgentContext` metadata.
@@ -26,6 +27,7 @@ agent/
 │   ├── agentic_message.go   # Text and image message constructors
 │   ├── ctx.go               # AgentContext with concurrency-safe metadata
 │   ├── context_uid.go       # ContextUID conversation identifier
+│   ├── run_signature.go     # RunUID, RunSignature, and context-boundary helpers
 │   ├── event.go             # Strongly typed runtime events
 │   ├── mcp_tool.go          # MCP Tool to common.Tool adapter
 │   └── tool.go              # Tool, ToolResult, and JSON Schema helpers
@@ -93,7 +95,7 @@ func main() {
 
 	agent := react.NewAgent(llm, 128, ram.NewRAMContextManager())
 
-	contextUID, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "Introduce the goat Agent SDK in three sentences."},
 		MaxStep:   8,
 	})
@@ -127,13 +129,23 @@ func main() {
 		usage = &common.AgentUsage{}
 	}
 
-	fmt.Printf("\nContextUID: %s\n", contextUID)
+	fmt.Printf("\nContextUID: %s\n", signature.ContextUID)
+	fmt.Printf("RunUID: %s\n", signature.RunUID)
 	fmt.Printf("Token usage: prompt=%d cached=%d completion=%d\n",
 		usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 }
 ```
 
-`Do` stores the current user message, starts the agent loop in the background, and immediately returns the run's `ContextUID` and `common.AgentEvent` stream. Every call has an independent stream, so callers do not need to poll the context manager to infer run boundaries. Each item is a concrete event value with no wrapper envelope. A normally consumed stream contains exactly one of `RunCompletedEvent`, `RunInterruptedEvent`, `RunCanceledEvent`, or `RunFailedEvent`, then closes. Errors returned directly by `Do` are synchronous setup failures; failures after `Do` returns are reported by `RunFailedEvent`.
+`Do` stores the current user message, starts the agent loop in the background, and immediately returns a `RunSignature` and `common.AgentEvent` stream. `RunSignature.ContextUID` identifies the persistent conversation while `RunSignature.RunUID` uniquely identifies this invocation. Every call has an independent stream, so callers do not need to poll the context manager to infer run boundaries. Each item is a concrete event value with no wrapper envelope. A normally consumed stream contains exactly one of `RunCompletedEvent`, `RunInterruptedEvent`, `RunCanceledEvent`, or `RunFailedEvent`, then closes. Errors returned directly by `Do` are synchronous setup failures; failures after `Do` returns are reported by `RunFailedEvent`.
+
+The explicit user message for every successful `Do` stores its `RunUID` under `common.RunUIDExtraKey` in `AgenticMessage.Extra`. This metadata is persisted by every context-manager backend, is not added to model-visible text, and survives context compression because user inputs are protected. Use `common.RunUIDFromMessage` for individual boundaries or split retained history directly:
+
+```go
+messages := manager.GetAll(ctx, signature.ContextUID)
+preamble, runs := common.SplitMessagesByRun(signature.ContextUID, messages)
+```
+
+`preamble` contains the system prompt and any legacy messages stored before run markers were introduced. Each `RunMessages` segment begins with one explicitly submitted `Do` user message and continues up to the next run boundary. Steering messages have no boundary of their own and remain in the surrounding run. Compression can replace detailed tool-process messages with cross-run artifacts, so these segments describe retained logical context rather than an immutable audit log.
 
 ## Steering a running conversation
 
@@ -141,7 +153,7 @@ func main() {
 
 ```go
 err = agent.Steer(ctx, &common.AgentSteerArgs{
-	ContextUID: contextUID,
+	ContextUID: signature.ContextUID,
 	UserInputs: []common.AgentUserInput{
 		{Text: "Do not deploy yet."},
 		{Text: "Run the complete test suite first."},
@@ -190,7 +202,7 @@ agent.AddTool(context.Background(), calculator)
 
 Describe arrays and nested objects with `ToolProperty.Items` and `ToolProperty.Properties`. See [common/ARRAY_PARAMETERS.md](common/ARRAY_PARAMETERS.md) for additional examples.
 
-Tool names are automatically converted to a model-compatible format. If names collide, the SDK appends a numeric suffix. Tool implementations can read per-run context metadata with `AgentContext.GetMeta`.
+Tool names are automatically converted to a model-compatible format. If names collide, the SDK appends a numeric suffix. Tool implementations can read per-run context metadata with `AgentContext.GetMeta`. The SDK reserves `context_uid` and `run_uid` metadata for the current invocation and overwrites caller-provided values for those keys; use `common.RunSignatureFromContext` to read them together.
 
 To pause the background agent loop after a tool runs—for example, while waiting for human approval—wrap the tool with `common.InterruptLoopAfter`:
 
@@ -284,19 +296,19 @@ manager, err := mysql.NewMysqlContextManager("127.0.0.1", 3306, "user", "passwor
 ### Continuing a conversation
 
 ```go
-contextUID, firstRun, err := agent.Do(ctx, &common.AgentDoArgs{
+firstSignature, firstRun, err := agent.Do(ctx, &common.AgentDoArgs{
 	UserInput: common.AgentUserInput{Text: "Remember that the project codename is goat."},
 })
 // Read firstRun until it returns streaming.ErrStreamClosed.
 
-_, secondRun, err := agent.Do(ctx, &common.AgentDoArgs{
-	ContextUID: contextUID,
+secondSignature, secondRun, err := agent.Do(ctx, &common.AgentDoArgs{
+	ContextUID: firstSignature.ContextUID,
 	UserInput: common.AgentUserInput{Text: "What is the project codename?"},
 })
 // Read secondRun until it returns streaming.ErrStreamClosed.
 ```
 
-When continuing a conversation, the SDK loads its history and updates the system prompt with the current run options. Appending the new `Do` user input reopens steering after the previous final answer. Because `Do` starts the agent loop asynchronously, drain the previous event stream until it closes before starting another run with the same `ContextUID`. This confirms that the previous run has finished or paused.
+`firstSignature.ContextUID == secondSignature.ContextUID`, while their `RunUID` values differ. When continuing a conversation, the SDK loads its history and updates the system prompt with the current run options. Appending the new `Do` user input reopens steering after the previous final answer. Because `Do` starts the agent loop asynchronously, drain the previous event stream until it closes before starting another run with the same `ContextUID`. This confirms that the previous run has finished or paused.
 
 ## Multimodal input
 
@@ -402,7 +414,7 @@ See the [tool plugin cookbook](toolplugin/README.md) for plugin interfaces, buil
 `Do` keeps its single-call shape and returns `streaming.Stream[common.AgentEvent]`. The runtime submits concrete event values directly to this stream, and consumers use a Go type switch without an emitter API or an additional event envelope.
 
 ```go
-contextUID, eventStream, err := agent.Do(ctx, args)
+signature, eventStream, err := agent.Do(ctx, args)
 if err != nil {
 	return err
 }
@@ -425,7 +437,7 @@ for {
 	case common.ToolCallFailedEvent:
 		fmt.Printf("tool failed: %s -> %s\n", event.Name, event.Error)
 	case common.FinalAnswerCompletedEvent:
-		fmt.Printf("final answer stored for %s\n", contextUID)
+		fmt.Printf("final answer stored for %s/%s\n", signature.ContextUID, signature.RunUID)
 	case common.RunFailedEvent:
 		return fmt.Errorf("agent failed during %s: %s", event.Operation, event.Error)
 	}
@@ -458,7 +470,7 @@ FinalAnswerWebhook: &common.FinalAnswerWebhookConfig{
 },
 ```
 
-The webhook payload contains the event name, agent name, `ContextUID`, user input, final answer, and generation time. Runtime lifecycle and tool details remain in the event stream and are not duplicated in the webhook payload.
+The webhook payload contains the event name, agent name, `ContextUID`, `RunUID`, user input, final answer, and generation time. Runtime lifecycle and tool details remain in the event stream and are not duplicated in the webhook payload.
 
 ## Built-in tools
 

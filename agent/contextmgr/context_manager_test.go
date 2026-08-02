@@ -55,6 +55,50 @@ func TestContextManagerPendingInboxContract(t *testing.T) {
 	}
 }
 
+func TestContextManagersPreserveRunBoundaries(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		new  func(*testing.T) contextmgr.ContextManager
+	}{
+		{name: "ram", new: func(*testing.T) contextmgr.ContextManager { return ram.NewRAMContextManager() }},
+		{name: "file", new: func(t *testing.T) contextmgr.ContextManager {
+			return filectx.NewFileContextManager(t.TempDir())
+		}},
+		{name: "sqlite", new: func(t *testing.T) contextmgr.ContextManager {
+			manager, err := sqlite.NewSQLiteContextManager(filepath.Join(t.TempDir(), "context.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return manager
+		}},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			manager := test.new(t)
+			ctx := context.Background()
+			contextUID := manager.InitNew(ctx)
+			message := schema.UserAgenticMessage("request")
+			common.MarkRunStart(message, "run")
+			if err := manager.Append(ctx, contextUID, message); err != nil {
+				t.Fatal(err)
+			}
+
+			stored := manager.GetAll(ctx, contextUID)
+			if len(stored) != 1 {
+				t.Fatalf("stored message count = %d, want 1", len(stored))
+			}
+			if got, ok := common.RunUIDFromMessage(stored[0]); !ok || got != "run" {
+				t.Fatalf("stored run UID = %q, %v", got, ok)
+			}
+		})
+	}
+}
+
 func testPendingInboxContract(t *testing.T, manager contextmgr.ContextManager) {
 	t.Helper()
 

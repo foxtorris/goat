@@ -50,7 +50,8 @@ type AgentEvent interface {
 }
 
 type RunStartedEvent struct {
-	MaxStep int `json:"max_step"`
+	Signature RunSignature `json:"run_signature"`
+	MaxStep   int          `json:"max_step"`
 }
 
 func (RunStartedEvent) Type() AgentEventType { return AgentEventTypeRunStarted }
