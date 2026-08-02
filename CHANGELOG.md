@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-02
+
+This release introduces per-invocation run identities, a typed execution event
+stream, forkable settled runs, and a versioned persistence contract. These
+changes make long-running agent activity easier to observe and correlate while
+keeping conversation state transitions consistent across storage backends.
+
+### Highlights
+
+- Every `Agent.Do` call now has a `RunSignature` containing both the persistent
+  `ContextUID` and a unique `RunUID`, so callers can correlate events, tools,
+  webhooks, and retained messages with one invocation.
+- The former step stream is replaced by typed lifecycle events covering model
+  calls, compression, tool calls, steering, final-answer generation, usage,
+  and terminal outcomes.
+- Settled runs can be forked into independent conversations without copying
+  pending steering messages or changing the source conversation.
+- Conversation transitions now live in `contextmgr.Manager`; storage backends
+  implement a small versioned compare-and-swap contract.
+
 ### Changed
 
 - **Breaking:** `common.Agent.Do` now returns `common.RunSignature` instead of `common.ContextUID`. The signature contains the persistent conversation ID and a unique ID for that invocation.
@@ -15,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Breaking:** `CommitFinal` and `SealRun` are replaced by one atomic `SettleRun`; `InitNew`, `GetAll`, `Reset`, and `EnqueuePendingMessages` become `Create`, `Load`, `Replace`, and `Enqueue`.
 - Model thinking and final-answer generation now stream text through `AssistantTextDeltaEvent`; terminal events expose aggregate run usage and asynchronous failure, cancellation, or interruption state.
 - Parallel tool completion events now arrive in actual completion order while tool results passed back to the model retain request order.
+- `common.ToolResult` adds `Usage`, allowing nested agent tools to contribute token usage to the parent run total. `DefaultToolResult.AddUsage` accumulates this usage, and `AgentUsage` now has stable JSON field names.
 
 ### Added
 
@@ -27,6 +48,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Removed `common.Step`, execution callbacks, `OptimizationAdvice`, and `AgentDoArgs.FinalAnswerStreamingFunc`. Event consumers observe execution directly through the stream returned by `Do`.
 - Removed the unused `steps` field from final-answer webhook payloads.
+
+### Fixed
+
+- `goatc` now closes gRPC tool-provider connections during runtime shutdown and
+  also cleans up connections opened before a later provider fails to load.
+
+### Migration notes
+
+- Update `Agent.Do` call sites to receive `(RunSignature, Stream[AgentEvent],
+  error)`. Continue a conversation with `signature.ContextUID`, and drain the
+  stream through exactly one terminal event before starting another run on the
+  same conversation.
+- Replace `common.Step` switches and callbacks with switches over concrete
+  `common.AgentEvent` values. Text arrives in `AssistantTextDeltaEvent`; inspect
+  `RunCompletedEvent`, `RunInterruptedEvent`, `RunCanceledEvent`, or
+  `RunFailedEvent` for the terminal outcome and aggregate usage.
+- Add `Usage() *common.AgentUsage` to custom `common.ToolResult`
+  implementations. Return `nil` when the tool does not incur nested agent
+  usage.
+- Custom context backends must implement `contextmgr.Store` (`Create`, `Load`,
+  `CompareAndSwap`, and `Delete`) and pass the Store to `contextmgr.NewManager`.
+  Applications using the built-in RAM, file, SQLite, or MySQL constructors do
+  not need to wire the Store directly.
+- Replace direct uses of the old context-manager transition methods with
+  `Create`, `Load`, `Replace`, `Enqueue`, and atomic `SettleRun` as applicable.
+  Existing SQLite and MySQL v0.2 data is upgraded online on the first successful
+  compare-and-swap; no offline migration is required.
+
+### Maintenance
+
+- Updated the release artifact pipeline to `actions/download-artifact@v8` and
+  `softprops/action-gh-release@v3`.
+- Pinned CodeQL actions to `v4.37.3`.
 
 ## [0.2.0] - 2026-07-31
 
@@ -53,6 +107,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Contribution, security, code of conduct, and GitHub issue and pull request guidance.
 - Dependabot configuration for Go modules and GitHub Actions.
 
-[Unreleased]: https://github.com/torrischen/goat/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/torrischen/goat/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/torrischen/goat/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/torrischen/goat/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/torrischen/goat/releases/tag/v0.1.0
