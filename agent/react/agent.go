@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -281,18 +282,30 @@ func (a *Agent) LoadSharedLibPluginTools(ctx context.Context, pluginDir ...strin
 	return nil
 }
 
-func (a *Agent) LoadRPCPluginTools(ctx context.Context, address ...string) error {
-	plugins := make([]toolplugin.ToolPlugin, 0)
-	for _, addr := range address {
-		ps, err := toolplugin.LoadPluginsFromRPC(addr)
-		if err != nil {
-			logging.Errorf("LoadRPCPluginTools error from address %s: %v", addr, err)
-			return err
+func (a *Agent) LoadRPCPluginTools(ctx context.Context, address ...string) ([]io.Closer, error) {
+	plugins := make([]toolplugin.ToolPlugin, 0, len(address))
+	resources := make([]io.Closer, 0, len(address))
+	rollback := func() {
+		for i := len(resources) - 1; i >= 0; i-- {
+			if err := resources[i].Close(); err != nil {
+				logging.Errorf("LoadRPCPluginTools close error: %v", err)
+			}
 		}
+	}
+
+	for _, addr := range address {
+		ps, closer, err := toolplugin.LoadPluginsFromRPC(addr)
+		if err != nil {
+			rollback()
+			logging.Errorf("LoadRPCPluginTools error from address %s: %v", addr, err)
+			return nil, err
+		}
+		resources = append(resources, closer)
 
 		if err := ps.Ping(); err != nil {
+			rollback()
 			logging.Errorf("LoadRPCPluginTools ping error for plugin %s: %v", ps.Name(), err)
-			continue
+			return nil, err
 		}
 
 		plugins = append(plugins, ps)
@@ -307,7 +320,7 @@ func (a *Agent) LoadRPCPluginTools(ctx context.Context, address ...string) error
 		))
 	}
 
-	return nil
+	return resources, nil
 }
 
 func (a *Agent) buildSystemPrompt(

@@ -96,12 +96,15 @@ func (grpcProvider) Load(
 	_ fs.FS,
 	_ string,
 ) ([]io.Closer, error) {
+	addresses := make([]string, 0, len(tools))
 	for _, tool := range tools {
-		if err := agent.LoadRPCPluginTools(ctx, tool.Address); err != nil {
-			return nil, fmt.Errorf("connect to %s: %w", providerLabel(tool), err)
-		}
+		addresses = append(addresses, tool.Address)
 	}
-	return nil, nil
+	resources, err := agent.LoadRPCPluginTools(ctx, addresses...)
+	if err != nil {
+		return nil, fmt.Errorf("connect to gRPC tool providers: %w", err)
+	}
+	return resources, nil
 }
 
 func (mcpProvider) Load(

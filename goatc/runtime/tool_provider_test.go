@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"net"
 	"net/http/httptest"
@@ -16,12 +17,14 @@ import (
 	pluginpb "github.com/torrischen/goat/agent/toolplugin/pb"
 	"github.com/torrischen/goat/goatc/config"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/stats"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 type testPluginService struct {
 	pluginpb.UnimplementedPluginServiceServer
 	name      string
+	pingErr   error
 	initCalls atomic.Int32
 	pingCalls atomic.Int32
 }
@@ -45,12 +48,38 @@ func (s *testPluginService) Properties(context.Context, *emptypb.Empty) (*plugin
 
 func (s *testPluginService) Ping(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
 	s.pingCalls.Add(1)
+	if s.pingErr != nil {
+		return nil, s.pingErr
+	}
 	return &emptypb.Empty{}, nil
 }
 
+type connectionStats struct {
+	ended chan struct{}
+}
+
+func (*connectionStats) TagRPC(ctx context.Context, _ *stats.RPCTagInfo) context.Context {
+	return ctx
+}
+
+func (*connectionStats) HandleRPC(context.Context, stats.RPCStats) {}
+
+func (*connectionStats) TagConn(ctx context.Context, _ *stats.ConnTagInfo) context.Context {
+	return ctx
+}
+
+func (s *connectionStats) HandleConn(_ context.Context, event stats.ConnStats) {
+	if _, ok := event.(*stats.ConnEnd); ok {
+		select {
+		case s.ended <- struct{}{}:
+		default:
+		}
+	}
+}
+
 func TestLoadToolProvidersLoadsMultipleGRPCAndMCPServers(t *testing.T) {
-	grpcAddressOne, grpcServiceOne := startTestPluginServer(t, "grpc_one")
-	grpcAddressTwo, grpcServiceTwo := startTestPluginServer(t, "grpc_two")
+	grpcAddressOne, grpcServiceOne, grpcConnectionOne := startTestPluginServer(t, "grpc_one", nil)
+	grpcAddressTwo, grpcServiceTwo, _ := startTestPluginServer(t, "grpc_two", nil)
 	mcpServerOne := startTestMCPServer(t, "mcp_one")
 	mcpServerTwo := startTestMCPServer(t, "mcp_two")
 
@@ -71,10 +100,8 @@ func TestLoadToolProvidersLoadsMultipleGRPCAndMCPServers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadToolProviders() error = %v", err)
 	}
-	defer closeResources(resources)
-
-	if len(resources) != 2 {
-		t.Fatalf("len(resources) = %d, want 2 MCP clients", len(resources))
+	if len(resources) != 4 {
+		t.Fatalf("len(resources) = %d, want 2 gRPC plugins and 2 MCP clients", len(resources))
 	}
 	for _, service := range []*testPluginService{grpcServiceOne, grpcServiceTwo} {
 		if service.initCalls.Load() != 1 {
@@ -84,6 +111,25 @@ func TestLoadToolProvidersLoadsMultipleGRPCAndMCPServers(t *testing.T) {
 			t.Errorf("gRPC Ping calls = %d, want 1", service.pingCalls.Load())
 		}
 	}
+
+	closeResources(resources)
+	waitForConnectionEnd(t, grpcConnectionOne)
+}
+
+func TestGRPCProviderRollsBackConnectionsWhenPingFails(t *testing.T) {
+	firstAddress, _, firstConnection := startTestPluginServer(t, "first", nil)
+	secondAddress, _, secondConnection := startTestPluginServer(t, "second", errors.New("ping failed"))
+	agent := react.NewAgent(nil, 128, ram.NewRAMContextManager())
+
+	_, err := (grpcProvider{}).Load(context.Background(), agent, []config.Tool{
+		{Provider: config.ToolProviderGRPC, Address: firstAddress},
+		{Provider: config.ToolProviderGRPC, Address: secondAddress},
+	}, emptyFS{}, "")
+	if err == nil {
+		t.Fatal("Load() error = nil, want ping error")
+	}
+	waitForConnectionEnd(t, secondConnection)
+	waitForConnectionEnd(t, firstConnection)
 }
 
 func TestExpandValuesUsesRuntimeEnvironment(t *testing.T) {
@@ -96,21 +142,31 @@ func TestExpandValuesUsesRuntimeEnvironment(t *testing.T) {
 	}
 }
 
-func startTestPluginServer(t *testing.T, name string) (string, *testPluginService) {
+func startTestPluginServer(t *testing.T, name string, pingErr error) (string, *testPluginService, *connectionStats) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	server := grpc.NewServer()
-	service := &testPluginService{name: name}
+	connection := &connectionStats{ended: make(chan struct{}, 1)}
+	server := grpc.NewServer(grpc.StatsHandler(connection))
+	service := &testPluginService{name: name, pingErr: pingErr}
 	pluginpb.RegisterPluginServiceServer(server, service)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() {
 		server.Stop()
 		_ = listener.Close()
 	})
-	return listener.Addr().String(), service
+	return listener.Addr().String(), service, connection
+}
+
+func waitForConnectionEnd(t *testing.T, connection *connectionStats) {
+	t.Helper()
+	select {
+	case <-connection.ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for gRPC connection to close")
+	}
 }
 
 func startTestMCPServer(t *testing.T, toolName string) *httptest.Server {

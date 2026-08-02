@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"plugin"
@@ -76,9 +77,9 @@ func LoadPluginsFromSharedLib(dir string) ([]ToolPlugin, error) {
 	return plugins, nil
 }
 
-func LoadPluginsFromRPC(address string) (ToolPlugin, error) {
+func LoadPluginsFromRPC(address string) (ToolPlugin, io.Closer, error) {
 	if address == "" {
-		return nil, fmt.Errorf("rpc server address is empty")
+		return nil, nil, fmt.Errorf("rpc server address is empty")
 	}
 
 	conn, err := grpc.NewClient(
@@ -87,7 +88,7 @@ func LoadPluginsFromRPC(address string) (ToolPlugin, error) {
 	)
 	if err != nil {
 		logging.Errorf("Failed to connect to plugin RPC server %s: %v", address, err)
-		return nil, err
+		return nil, nil, err
 	}
 
 	client := pb.NewPluginServiceClient(conn)
@@ -100,14 +101,14 @@ func LoadPluginsFromRPC(address string) (ToolPlugin, error) {
 	if err := tool.Init(); err != nil {
 		_ = conn.Close()
 		logging.Errorf("Failed to init plugin RPC server %s: %v", address, err)
-		return nil, err
+		return nil, nil, err
 	}
 
 	nameResp, err := client.Name(callCtx, &emptypb.Empty{})
 	if err != nil {
 		_ = conn.Close()
 		logging.Errorf("Failed to get plugin name from RPC server %s: %v", address, err)
-		return nil, err
+		return nil, nil, err
 	}
 	tool.name = nameResp.GetName()
 
@@ -115,7 +116,7 @@ func LoadPluginsFromRPC(address string) (ToolPlugin, error) {
 	if err != nil {
 		_ = conn.Close()
 		logging.Errorf("Failed to get plugin description from RPC server %s: %v", address, err)
-		return nil, err
+		return nil, nil, err
 	}
 	tool.description = descResp.GetDescription()
 
@@ -123,7 +124,7 @@ func LoadPluginsFromRPC(address string) (ToolPlugin, error) {
 	if err != nil {
 		_ = conn.Close()
 		logging.Errorf("Failed to get plugin parameters from RPC server %s: %v", address, err)
-		return nil, err
+		return nil, nil, err
 	}
 
 	toolProperties := make([]common.ToolProperty, 0)
@@ -147,7 +148,7 @@ func LoadPluginsFromRPC(address string) (ToolPlugin, error) {
 	tool.parameters = common.NewToolParameters(toolProperties...)
 
 	logging.Infof("Successfully loaded plugin from RPC server: %s", address)
-	return tool, nil
+	return tool, conn, nil
 }
 
 type rpcToolPlugin struct {
