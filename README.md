@@ -153,6 +153,7 @@ Go plugins are built natively and supported on Linux, macOS, and FreeBSD. See th
 | --- | --- |
 | [`goatc`](goatc) | YAML-driven Agent compiler with Go plugin, gRPC, and MCP tool providers plus a Bubble Tea interface. |
 | [`agent/react`](agent/react) | Asynchronous native function-calling agent runtime. |
+| [`agent/planexecute`](agent/planexecute) | Dependency-aware planner and scheduler backed by a React executor. |
 | [`agent/common`](agent/common) | Agent, tool, event, usage, and multimodal contracts. |
 | [`agent/contextmgr`](agent/contextmgr) | Conversation state machine, versioned Store contract, and RAM, file, SQLite, and MySQL backends. |
 | [`agent/tools`](agent/tools) | Planning, skills, terminal, and shell tools. |

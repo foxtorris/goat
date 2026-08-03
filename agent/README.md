@@ -2,7 +2,7 @@
 
 `agent` is goat's Go agent SDK. Built on CloudWeGo Eino's `model.AgenticModel`, it provides native model tool calling, conversation context management, context compression, task planning, skills, MCP integration, tool plugins, multimodal input, and typed runtime events.
 
-The current agent implementation lives in `react`. The model decides whether and how to call tools; the SDK executes those tools, persists messages, manages context, and produces the final answer.
+The `react` implementation lets the model decide whether and how to call tools. The `planexecute` implementation creates a dependency-aware plan and delegates each step to a React agent before producing one final answer.
 
 ## Features
 
@@ -38,6 +38,7 @@ agent/
 │   ├── mysql/               # MySQL storage
 │   ├── ram/                 # In-process storage
 │   └── sqlite/              # SQLite storage; defaults to data/goat_context.sqlite
+├── planexecute/             # Planner and scheduler backed by a React step executor
 ├── react/                   # Native function-calling agent implementation
 │   └── compression/         # Independent context-compression strategies
 │       ├── precise.go       # Structured checkpoint strategy
