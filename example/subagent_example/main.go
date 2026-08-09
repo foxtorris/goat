@@ -38,7 +38,7 @@ func main() {
 	agent.AddTool(ctx, tools.Terminal())
 
 	// Example 1: Ask the agent to delegate tasks to subagents
-	fmt.Println("=== Example: Agent delegating tasks to subagents ===\n")
+	fmt.Println("=== Example: Agent delegating tasks to subagents ===")
 
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{
