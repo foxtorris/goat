@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Highlights
+
+- Added a dependency-aware plan-and-execute agent that plans multi-step tasks,
+  delegates each ready step to a React agent, and synthesizes one final answer.
+- React agents can now launch independent subagents in the background and poll
+  their execution status and results through built-in tools.
+- The terminal tool now offers an optional Linux sandbox backed by bubblewrap
+  for isolated command execution with explicit filesystem and environment
+  access.
+
+### Added
+
+- Added `agent/planexecute.Agent`, including validated dependency plans,
+  configurable planning and execution limits, steering-triggered replanning,
+  aggregate usage accounting, streamed final answers, and plan/step lifecycle
+  events. The agent supports the standard `Do`, `Steer`, and `Fork` conversation
+  workflows and delegates tool use to an existing `react.Agent`.
+- Added `tools.SpawnSubAgent` and `tools.GetSubAgentStatus`. Spawned agents run
+  asynchronously with inherited context metadata and skill configuration, and
+  expose their run signature, terminal status, result or error, duration,
+  iterations, tool calls, and token usage through status queries.
+- Added `tools.TerminalSandboxed`, `tools.TerminalWithSandbox`, and
+  `tools.TerminalWithConfig` with `SandboxConfig` for bubblewrap-based command
+  isolation on Linux. Callers can configure writable and read-only bind mounts,
+  environment preservation, the bubblewrap executable, and network namespace
+  behavior while the existing `tools.Terminal` remains unsandboxed.
+- Added examples and tests for plan-and-execute orchestration, concurrent
+  subagents, and sandboxed terminal execution, plus terminal sandbox setup and
+  security documentation.
+
+### Fixed
+
+- Fixed a redundant newline in the subagent example that caused a `go vet`
+  warning.
+
 ## [0.2.1] - 2026-08-02
 
 This release introduces per-invocation run identities, a typed execution event

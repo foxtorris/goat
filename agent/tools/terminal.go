@@ -7,6 +7,8 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -25,16 +27,68 @@ const (
 	truncationBoundaryBytes = 256
 )
 
+// SandboxConfig defines the configuration for sandboxed command execution using bubblewrap.
+type SandboxConfig struct {
+	// Enabled determines whether to use bubblewrap sandbox.
+	Enabled bool
+	// BwrapPath is the path to the bubblewrap binary. Defaults to "bwrap".
+	BwrapPath string
+	// AllowedPaths are additional paths to bind mount (read-write) into the sandbox.
+	AllowedPaths []string
+	// ReadOnlyPaths are additional paths to bind mount (read-only) into the sandbox.
+	ReadOnlyPaths []string
+	// TmpfsSize is the size limit for /tmp in the sandbox. Defaults to "100M".
+	TmpfsSize string
+	// NetworkAccess determines whether network access is allowed. Defaults to false.
+	NetworkAccess bool
+	// PreserveEnv is a list of environment variable names to preserve in the sandbox.
+	PreserveEnv []string
+}
+
 // Terminal returns a Codex-style shell command tool adapted to React's
 // common.Tool interface. Commands run synchronously; PTY sessions, sandbox
 // approvals, and interactive stdin are intentionally left to the host process.
 func Terminal() common.Tool {
-	return &common.DefaultTool{
-		ToolName: InternalToolShellCommand,
-		ToolDescription: `Runs a shell command and returns its combined stdout and stderr.
+	return TerminalWithConfig(SandboxConfig{Enabled: false})
+}
+
+// TerminalSandboxed returns a Terminal tool with strict sandbox enabled using bubblewrap.
+// Only works on Linux systems. Uses secure defaults:
+// - No network access
+// - Only essential system directories mounted read-only
+// - Limited tmpfs (100M)
+// - Minimal environment variables
+func TerminalSandboxed() common.Tool {
+	return TerminalWithSandbox(SandboxConfig{})
+}
+
+// TerminalWithSandbox returns a Terminal tool with custom sandbox configuration.
+// The Enabled field is automatically set to true.
+func TerminalWithSandbox(config SandboxConfig) common.Tool {
+	config.Enabled = true
+	if config.BwrapPath == "" {
+		config.BwrapPath = "bwrap"
+	}
+	if config.TmpfsSize == "" {
+		config.TmpfsSize = "100M"
+	}
+	return TerminalWithConfig(config)
+}
+
+// TerminalWithConfig returns a Terminal tool with the specified configuration.
+func TerminalWithConfig(config SandboxConfig) common.Tool {
+	description := `Runs a shell command and returns its combined stdout and stderr.
 Use this tool for repository inspection, such as listing files, searching with rg, and reading files with sed or cat.
 Always set workdir when the repository directory is known. Prefer rg and rg --files over grep and find.
-Commands run synchronously without a PTY, approval flow, or sandbox supplied by this tool.`,
+Commands run synchronously without a PTY, approval flow, or interactive stdin.`
+
+	if config.Enabled {
+		description += "\nSandbox mode: Commands run in a bubblewrap sandbox with restricted system access."
+	}
+
+	return &common.DefaultTool{
+		ToolName:        InternalToolShellCommand,
+		ToolDescription: description,
 		ToolParameters: common.NewToolParameters(
 			common.ToolProperty{
 				Name:        "command",
@@ -58,7 +112,9 @@ Commands run synchronously without a PTY, approval flow, or sandbox supplied by 
 				Description: "Maximum returned output size in bytes. Defaults to 40000 and is capped at 400000.",
 			},
 		),
-		F: executeShellCommand,
+		F: func(actx *common.AgentContext, inputs map[string]any) common.ToolResult {
+			return executeShellCommand(actx, inputs, config)
+		},
 	}
 }
 
@@ -67,7 +123,7 @@ func ShellCommand() common.Tool {
 	return Terminal()
 }
 
-func executeShellCommand(actx *common.AgentContext, inputs map[string]any) common.ToolResult {
+func executeShellCommand(actx *common.AgentContext, inputs map[string]any, config SandboxConfig) common.ToolResult {
 	command, ok := stringInput(inputs, "command")
 	if !ok || strings.TrimSpace(command) == "" {
 		return common.NewDefaultToolResult("command parameter is missing or invalid.")
@@ -96,14 +152,30 @@ func executeShellCommand(actx *common.AgentContext, inputs map[string]any) commo
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
-	}
+	var cmd *exec.Cmd
+	if config.Enabled {
+		// Check if bubblewrap is available
+		if runtime.GOOS != "linux" {
+			return common.NewDefaultToolResult("Sandbox mode is only supported on Linux systems.")
+		}
+		if _, err := exec.LookPath(config.BwrapPath); err != nil {
+			return common.NewDefaultToolResult(fmt.Sprintf("Sandbox mode requires bubblewrap (%s) but it is not installed: %v", config.BwrapPath, err))
+		}
 
-	cmd := exec.CommandContext(ctx, shell, "-lc", command)
-	if workdir != "" {
-		cmd.Dir = workdir
+		bwrapArgs, err := buildBubblewrapArgs(command, workdir, config)
+		if err != nil {
+			return common.NewDefaultToolResult(fmt.Sprintf("Failed to build sandbox command: %v", err))
+		}
+		cmd = exec.CommandContext(ctx, config.BwrapPath, bwrapArgs...)
+	} else {
+		shell := os.Getenv("SHELL")
+		if shell == "" {
+			shell = "/bin/sh"
+		}
+		cmd = exec.CommandContext(ctx, shell, "-lc", command)
+		if workdir != "" {
+			cmd.Dir = workdir
+		}
 	}
 
 	startedAt := time.Now()
@@ -228,6 +300,133 @@ func exactFloatInt64(number float64) (int64, error) {
 	}
 	parsed := int64(number)
 	return parsed, nil
+}
+
+// buildBubblewrapArgs constructs the argument list for bubblewrap to create a strict sandbox.
+func buildBubblewrapArgs(command, workdir string, config SandboxConfig) ([]string, error) {
+	args := []string{
+		// Core isolation
+		"--unshare-all", // Unshare all namespaces (user, ipc, pid, net, uts, cgroup)
+		"--die-with-parent", // Kill sandbox if parent dies
+		"--new-session",     // New session ID
+	}
+
+	// Network isolation (default: no network)
+	if !config.NetworkAccess {
+		args = append(args, "--unshare-net")
+	}
+
+	// Essential read-only system directories (strict minimal set)
+	// We only bind what's absolutely necessary for basic shell commands
+	systemDirs := []string{
+		"/usr",    // User binaries and libraries
+		"/lib",    // System libraries (if exists)
+		"/lib64",  // 64-bit libraries (if exists)
+		"/etc",    // System configuration (read-only)
+	}
+
+	for _, dir := range systemDirs {
+		if _, err := os.Stat(dir); err == nil {
+			args = append(args, "--ro-bind", dir, dir)
+		}
+	}
+
+	// /bin and /sbin are usually symlinks to /usr/bin and /usr/sbin
+	// Check and bind them if they exist as real directories
+	for _, dir := range []string{"/bin", "/sbin"} {
+		if info, err := os.Lstat(dir); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				// It's a symlink, bind it as symlink
+				if target, err := os.Readlink(dir); err == nil {
+					args = append(args, "--symlink", target, dir)
+				}
+			} else {
+				// It's a real directory
+				args = append(args, "--ro-bind", dir, dir)
+			}
+		}
+	}
+
+	// Minimal /dev (only essential devices)
+	args = append(args,
+		"--dev-bind", "/dev/null", "/dev/null",
+		"--dev-bind", "/dev/zero", "/dev/zero",
+		"--dev-bind", "/dev/random", "/dev/random",
+		"--dev-bind", "/dev/urandom", "/dev/urandom",
+	)
+
+	// Minimal proc
+	args = append(args, "--proc", "/proc")
+
+	// Temporary filesystem with size limit
+	tmpfsSize := config.TmpfsSize
+	if tmpfsSize == "" {
+		tmpfsSize = "100M"
+	}
+	args = append(args, "--tmpfs", "/tmp")
+	args = append(args, "--setenv", "TMPDIR", "/tmp")
+
+	// Bind working directory if specified
+	if workdir != "" {
+		absWorkdir, err := filepath.Abs(workdir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve workdir: %w", err)
+		}
+		if _, err := os.Stat(absWorkdir); err != nil {
+			return nil, fmt.Errorf("workdir does not exist: %w", err)
+		}
+		args = append(args, "--bind", absWorkdir, absWorkdir)
+		args = append(args, "--chdir", absWorkdir)
+	}
+
+	// Bind additional allowed paths (read-write)
+	for _, path := range config.AllowedPaths {
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve allowed path %s: %w", path, err)
+		}
+		if _, err := os.Stat(absPath); err != nil {
+			return nil, fmt.Errorf("allowed path %s does not exist: %w", path, err)
+		}
+		args = append(args, "--bind", absPath, absPath)
+	}
+
+	// Bind additional read-only paths
+	for _, path := range config.ReadOnlyPaths {
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve read-only path %s: %w", path, err)
+		}
+		if _, err := os.Stat(absPath); err != nil {
+			return nil, fmt.Errorf("read-only path %s does not exist: %w", path, err)
+		}
+		args = append(args, "--ro-bind", absPath, absPath)
+	}
+
+	// Minimal environment variables
+	// By default, bubblewrap clears all env vars. We set only essential ones.
+	args = append(args,
+		"--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
+		"--setenv", "HOME", "/tmp/sandbox-home",
+		"--unsetenv", "HISTFILE", // Don't save command history
+	)
+
+	// Preserve specific environment variables if requested
+	for _, envName := range config.PreserveEnv {
+		if value := os.Getenv(envName); value != "" {
+			args = append(args, "--setenv", envName, value)
+		}
+	}
+
+	// Execute the shell command
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+
+	args = append(args, "--", shell, "-c", command)
+
+	return args, nil
 }
 
 type commandOutputBuffer struct {
