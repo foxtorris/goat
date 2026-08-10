@@ -306,7 +306,7 @@ func exactFloatInt64(number float64) (int64, error) {
 func buildBubblewrapArgs(command, workdir string, config SandboxConfig) ([]string, error) {
 	args := []string{
 		// Core isolation
-		"--unshare-all", // Unshare all namespaces (user, ipc, pid, net, uts, cgroup)
+		"--unshare-all",     // Unshare all namespaces (user, ipc, pid, net, uts, cgroup)
 		"--die-with-parent", // Kill sandbox if parent dies
 		"--new-session",     // New session ID
 	}
@@ -319,10 +319,10 @@ func buildBubblewrapArgs(command, workdir string, config SandboxConfig) ([]strin
 	// Essential read-only system directories (strict minimal set)
 	// We only bind what's absolutely necessary for basic shell commands
 	systemDirs := []string{
-		"/usr",    // User binaries and libraries
-		"/lib",    // System libraries (if exists)
-		"/lib64",  // 64-bit libraries (if exists)
-		"/etc",    // System configuration (read-only)
+		"/usr",   // User binaries and libraries
+		"/lib",   // System libraries (if exists)
+		"/lib64", // 64-bit libraries (if exists)
+		"/etc",   // System configuration (read-only)
 	}
 
 	for _, dir := range systemDirs {

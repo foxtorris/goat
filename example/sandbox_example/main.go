@@ -75,7 +75,7 @@ func networkSandboxExample(ctx *common.AgentContext) {
 
 	// Note: This may still fail in actual sandbox depending on system configuration
 	result := tool.Execute(ctx, map[string]any{
-		"command": "curl -I https://www.google.com 2>&1 || echo 'Network not available'",
+		"command":    "curl -I https://www.google.com 2>&1 || echo 'Network not available'",
 		"timeout_ms": 5000,
 	})
 
@@ -162,7 +162,7 @@ func securityBestPractices() {
 		AllowedPaths: []string{
 			"/specific/project/path", // Only allow needed paths
 		},
-		TmpfsSize:   "100M",              // Limit temporary file size
+		TmpfsSize:   "100M",             // Limit temporary file size
 		PreserveEnv: []string{"LC_ALL"}, // Only preserve necessary env vars
 	})
 
@@ -170,9 +170,9 @@ func securityBestPractices() {
 	badTool := tools.TerminalWithSandbox(tools.SandboxConfig{
 		NetworkAccess: true, // Unnecessary network access
 		AllowedPaths: []string{
-			"/",       // Too broad
-			"/home",   // Unnecessary access
-			"/etc",    // May contain sensitive info
+			"/",     // Too broad
+			"/home", // Unnecessary access
+			"/etc",  // May contain sensitive info
 		},
 		TmpfsSize: "10G", // Excessive temporary space
 		PreserveEnv: []string{
