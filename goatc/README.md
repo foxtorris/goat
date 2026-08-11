@@ -11,6 +11,7 @@ Every item under `tools` selects a provider:
 | `go_plugin` | A Go directory or `.go` file | Compiled as a native `.so` and embedded. One entry represents one `ToolPlugin`. |
 | `grpc` | A goat gRPC tool-plugin address | Connects to one remote `PluginService`. Add multiple entries to import multiple gRPC tools. |
 | `mcp` | An MCP server over stdio, SSE, or Streamable HTTP | Initializes the server and imports every tool returned by `tools/list`. |
+| `builtin` | `terminal` or `subagents` | Registers goat's terminal tool, optionally sandboxed with bubblewrap, or the asynchronous subagent tools. |
 
 For compatibility, an entry with `source` and no `provider` defaults to `go_plugin`.
 
@@ -51,6 +52,18 @@ tools:
     url: https://mcp.example.com/mcp
     headers:
       Authorization: Bearer ${MCP_TOKEN}
+
+  # Built-in tools require no plugin wrapper.
+  - provider: builtin
+    name: terminal
+    sandbox:
+      enabled: true # Linux only; requires bubblewrap.
+      network: false
+      writable_paths: [/workspace]
+      readonly_paths: [/etc/ssl/certs]
+      preserve_env: [HOME]
+  - provider: builtin
+    name: subagents
 
   # Legacy MCP SSE is also supported.
   - provider: mcp
@@ -149,7 +162,13 @@ At startup, providers are loaded in this order: local Go plugins, gRPC services,
 
 ```bash
 # From a Go module that depends on the same goat version as the tools:
+go run github.com/torrischen/goat/goatc init -f goatc.yaml
 go run github.com/torrischen/goat/goatc validate -f goatc.yaml
+# Also check the API key, remote providers, bubblewrap, and configured paths.
+go run github.com/torrischen/goat/goatc validate -f goatc.yaml --check-runtime
+go run github.com/torrischen/goat/goatc inspect -f goatc.yaml
+# Run directly; local Go plugins are compiled into temporary runtime assets.
+go run github.com/torrischen/goat/goatc run -f goatc.yaml
 go run github.com/torrischen/goat/goatc build -f goatc.yaml
 
 # Override build.output:

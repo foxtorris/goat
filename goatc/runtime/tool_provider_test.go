@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"net"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -130,6 +132,27 @@ func TestGRPCProviderRollsBackConnectionsWhenPingFails(t *testing.T) {
 	}
 	waitForConnectionEnd(t, secondConnection)
 	waitForConnectionEnd(t, firstConnection)
+}
+
+func TestCheckWritablePath(t *testing.T) {
+	dir := t.TempDir()
+	if err := checkWritablePath(dir); err != nil {
+		t.Fatalf("checkWritablePath(directory) error = %v", err)
+	}
+	if matches, err := filepath.Glob(filepath.Join(dir, ".goatc-write-check-*")); err != nil || len(matches) != 0 {
+		t.Fatalf("write probes were not cleaned up: %v, %v", matches, err)
+	}
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkWritablePath(file); err != nil {
+		t.Fatalf("checkWritablePath(file) error = %v", err)
+	}
+	data, err := os.ReadFile(file)
+	if err != nil || string(data) != "unchanged" {
+		t.Fatalf("write check modified file: %q, %v", data, err)
+	}
 }
 
 func TestExpandValuesUsesRuntimeEnvironment(t *testing.T) {

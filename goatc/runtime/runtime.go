@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 
 	"github.com/cloudwego/eino-ext/components/model/agenticclaude"
@@ -33,6 +35,11 @@ func Run(ctx context.Context, assets fs.FS) error {
 	if err != nil {
 		return err
 	}
+	return RunConfig(ctx, cfg, assets)
+}
+
+// RunConfig initializes and launches an already parsed configuration.
+func RunConfig(ctx context.Context, cfg *config.Config, assets fs.FS) error {
 	llm, err := newModel(ctx, cfg.Model)
 	if err != nil {
 		return err
@@ -53,6 +60,77 @@ func Run(ctx context.Context, assets fs.FS) error {
 	defer closeResources(resources)
 
 	return tui.Run(ctx, agent, cfg)
+}
+
+// CheckRuntime verifies credentials, sandbox prerequisites, and remote tool providers.
+func CheckRuntime(ctx context.Context, cfg *config.Config) error {
+	if _, err := newModel(ctx, cfg.Model); err != nil {
+		return err
+	}
+	for i, tool := range cfg.Tools {
+		if tool.Provider != config.ToolProviderBuiltin || tool.Name != config.BuiltinTerminal || tool.Sandbox == nil || !tool.Sandbox.Enabled {
+			continue
+		}
+		if goruntime.GOOS != "linux" {
+			return fmt.Errorf("tools[%d]: terminal sandbox requires Linux", i)
+		}
+		path := tool.Sandbox.BwrapPath
+		if path == "" {
+			path = "bwrap"
+		}
+		if _, err := exec.LookPath(path); err != nil {
+			return fmt.Errorf("tools[%d]: find bubblewrap %q: %w", i, path, err)
+		}
+		for _, path := range tool.Sandbox.ReadOnlyPaths {
+			if _, err := os.Stat(os.ExpandEnv(path)); err != nil {
+				return fmt.Errorf("tools[%d]: access read-only sandbox path %q: %w", i, path, err)
+			}
+		}
+		for _, path := range tool.Sandbox.WritablePaths {
+			if err := checkWritablePath(os.ExpandEnv(path)); err != nil {
+				return fmt.Errorf("tools[%d]: access writable sandbox path %q: %w", i, path, err)
+			}
+		}
+	}
+
+	probe := react.NewAgent(nil, cfg.Agent.ModelMaxTokensK, nil)
+	remote := *cfg
+	remote.Tools = nil
+	for _, tool := range cfg.Tools {
+		if tool.Provider == config.ToolProviderGRPC || tool.Provider == config.ToolProviderMCP {
+			remote.Tools = append(remote.Tools, tool)
+		}
+	}
+	resources, err := loadToolProviders(ctx, probe, &remote, os.DirFS("."))
+	if err != nil {
+		return err
+	}
+	closeResources(resources)
+	return nil
+}
+
+func checkWritablePath(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		probe, err := os.CreateTemp(path, ".goatc-write-check-*")
+		if err != nil {
+			return err
+		}
+		name := probe.Name()
+		if err := probe.Close(); err != nil {
+			_ = os.Remove(name)
+			return err
+		}
+		return os.Remove(name)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	return file.Close()
 }
 
 func newModel(ctx context.Context, cfg config.Model) (model.AgenticModel, error) {

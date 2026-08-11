@@ -23,6 +23,12 @@ const (
 	ToolProviderGoPlugin ToolProvider = "go_plugin"
 	ToolProviderGRPC     ToolProvider = "grpc"
 	ToolProviderMCP      ToolProvider = "mcp"
+	ToolProviderBuiltin  ToolProvider = "builtin"
+)
+
+const (
+	BuiltinTerminal  = "terminal"
+	BuiltinSubagents = "subagents"
 )
 
 // MCPTransport selects the transport used to connect to an MCP server.
@@ -85,6 +91,18 @@ type Tool struct {
 	URL       string            `yaml:"url,omitempty"`
 	Env       map[string]string `yaml:"env,omitempty"`
 	Headers   map[string]string `yaml:"headers,omitempty"`
+	Sandbox   *Sandbox          `yaml:"sandbox,omitempty"`
+}
+
+// Sandbox configures bubblewrap isolation for the builtin terminal tool.
+type Sandbox struct {
+	Enabled       bool     `yaml:"enabled,omitempty"`
+	BwrapPath     string   `yaml:"bwrap_path,omitempty"`
+	WritablePaths []string `yaml:"writable_paths,omitempty"`
+	ReadOnlyPaths []string `yaml:"readonly_paths,omitempty"`
+	TmpfsSize     string   `yaml:"tmpfs_size,omitempty"`
+	Network       bool     `yaml:"network,omitempty"`
+	PreserveEnv   []string `yaml:"preserve_env,omitempty"`
 }
 
 // Build configures the output artifact.
@@ -215,6 +233,7 @@ func (c *Config) Validate() error {
 
 	seenPluginNames := make(map[string]struct{}, len(c.Tools))
 	seenGRPCAddresses := make(map[string]struct{}, len(c.Tools))
+	seenBuiltins := make(map[string]struct{}, len(c.Tools))
 	hasGoPlugins := false
 	for i := range c.Tools {
 		tool := &c.Tools[i]
@@ -236,7 +255,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("duplicate Go plugin name %q", tool.Name)
 			}
 			seenPluginNames[tool.Name] = struct{}{}
-			if tool.Address != "" || tool.Transport != "" || tool.Command != "" || len(tool.Args) > 0 || tool.URL != "" || len(tool.Env) > 0 || len(tool.Headers) > 0 {
+			if tool.Address != "" || tool.Transport != "" || tool.Command != "" || len(tool.Args) > 0 || tool.URL != "" || len(tool.Env) > 0 || len(tool.Headers) > 0 || tool.Sandbox != nil {
 				return fmt.Errorf("tools[%d] contains options that are not valid for provider %q", i, tool.Provider)
 			}
 		case ToolProviderGRPC:
@@ -248,13 +267,21 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("duplicate gRPC tool address %q", tool.Address)
 			}
 			seenGRPCAddresses[tool.Address] = struct{}{}
-			if tool.Source != "" || tool.Transport != "" || tool.Command != "" || len(tool.Args) > 0 || tool.URL != "" || len(tool.Env) > 0 || len(tool.Headers) > 0 {
+			if tool.Source != "" || tool.Transport != "" || tool.Command != "" || len(tool.Args) > 0 || tool.URL != "" || len(tool.Env) > 0 || len(tool.Headers) > 0 || tool.Sandbox != nil {
 				return fmt.Errorf("tools[%d] contains options that are not valid for provider %q", i, tool.Provider)
 			}
 		case ToolProviderMCP:
 			if err := validateMCPTool(i, tool); err != nil {
 				return err
 			}
+		case ToolProviderBuiltin:
+			if err := validateBuiltinTool(i, tool); err != nil {
+				return err
+			}
+			if _, exists := seenBuiltins[tool.Name]; exists {
+				return fmt.Errorf("duplicate builtin tool %q", tool.Name)
+			}
+			seenBuiltins[tool.Name] = struct{}{}
 		default:
 			return fmt.Errorf("unsupported tools[%d].provider %q", i, tool.Provider)
 		}
@@ -280,8 +307,34 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+func validateBuiltinTool(index int, tool *Tool) error {
+	tool.Name = strings.ToLower(strings.TrimSpace(tool.Name))
+	if tool.Name != BuiltinTerminal && tool.Name != BuiltinSubagents {
+		return fmt.Errorf("unsupported builtin tool %q at tools[%d]", tool.Name, index)
+	}
+	if tool.Source != "" || tool.Address != "" || tool.Transport != "" || tool.Command != "" || len(tool.Args) > 0 || tool.URL != "" || len(tool.Env) > 0 || len(tool.Headers) > 0 {
+		return fmt.Errorf("tools[%d] contains options that are not valid for builtin %q", index, tool.Name)
+	}
+	if tool.Name == BuiltinSubagents && tool.Sandbox != nil {
+		return fmt.Errorf("tools[%d].sandbox is only valid for builtin terminal", index)
+	}
+	if tool.Sandbox != nil {
+		for _, path := range append(append([]string{}, tool.Sandbox.WritablePaths...), tool.Sandbox.ReadOnlyPaths...) {
+			if strings.TrimSpace(path) == "" {
+				return fmt.Errorf("tools[%d].sandbox contains an empty path", index)
+			}
+		}
+		for _, name := range tool.Sandbox.PreserveEnv {
+			if strings.TrimSpace(name) == "" || strings.Contains(name, "=") {
+				return fmt.Errorf("tools[%d].sandbox contains an invalid environment variable name %q", index, name)
+			}
+		}
+	}
+	return nil
+}
+
 func validateMCPTool(index int, tool *Tool) error {
-	if tool.Source != "" || tool.Address != "" {
+	if tool.Source != "" || tool.Address != "" || tool.Sandbox != nil {
 		return fmt.Errorf("tools[%d] contains options that are not valid for provider %q", index, tool.Provider)
 	}
 	for key := range tool.Env {

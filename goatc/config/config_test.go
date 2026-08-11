@@ -145,6 +145,44 @@ tools:
 	}
 }
 
+func TestParseSupportsBuiltinTools(t *testing.T) {
+	cfg, err := Parse([]byte(`
+model: {provider: openai, name: gpt-5}
+tools:
+  - provider: builtin
+    name: terminal
+    sandbox:
+      enabled: true
+      writable_paths: [/workspace]
+      readonly_paths: [/etc]
+      preserve_env: [HOME]
+  - provider: builtin
+    name: subagents
+`))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.Tools[0].Sandbox == nil || !cfg.Tools[0].Sandbox.Enabled {
+		t.Fatal("terminal sandbox was not parsed")
+	}
+	if got := cfg.Tools[1].Name; got != BuiltinSubagents {
+		t.Fatalf("builtin name = %q, want %q", got, BuiltinSubagents)
+	}
+}
+
+func TestParseRejectsInvalidBuiltinConfiguration(t *testing.T) {
+	_, err := Parse([]byte(`
+model: {provider: openai, name: gpt-5}
+tools:
+  - provider: builtin
+    name: subagents
+    sandbox: {enabled: true}
+`))
+	if err == nil || !strings.Contains(err.Error(), "sandbox is only valid") {
+		t.Fatalf("Parse() error = %v, want builtin sandbox error", err)
+	}
+}
+
 func TestParseRejectsMultipleDocuments(t *testing.T) {
 	_, err := Parse([]byte(`
 model: {provider: openai, name: gpt-5}

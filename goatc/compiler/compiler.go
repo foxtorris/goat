@@ -2,20 +2,71 @@
 package compiler
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"testing/fstest"
 
 	"github.com/torrischen/goat/goatc/config"
+	goatcruntime "github.com/torrischen/goat/goatc/runtime"
 	"gopkg.in/yaml.v3"
 )
 
 // Result describes a completed build.
 type Result struct {
 	Output string
+}
+
+// Run compiles local plugins into temporary assets and starts the agent directly.
+func Run(ctx context.Context, configPath string, log io.Writer) error {
+	if log == nil {
+		log = io.Discard
+	}
+	absoluteConfig, err := filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("resolve config path: %w", err)
+	}
+	cfg, err := config.Load(absoluteConfig)
+	if err != nil {
+		return err
+	}
+	projectDir := filepath.Dir(absoluteConfig)
+	assets := fstest.MapFS{}
+	normalized, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("encode normalized config: %w", err)
+	}
+	assets["goatc.yaml"] = &fstest.MapFile{Data: normalized, Mode: 0o644}
+	for _, tool := range cfg.Tools {
+		if tool.Provider != config.ToolProviderGoPlugin {
+			continue
+		}
+		source := tool.Source
+		if !filepath.IsAbs(source) {
+			source = filepath.Join(projectDir, source)
+		}
+		temp, err := os.CreateTemp("", "goatc-plugin-*.so")
+		if err != nil {
+			return fmt.Errorf("create temporary plugin: %w", err)
+		}
+		pluginPath := temp.Name()
+		_ = temp.Close()
+		defer os.Remove(pluginPath)
+		fmt.Fprintf(log, "building plugin %s\n", tool.Name)
+		if err := buildPlugin(source, pluginPath, cfg.Build.Tags, log); err != nil {
+			return fmt.Errorf("build plugin %s: %w", tool.Name, err)
+		}
+		data, err := os.ReadFile(pluginPath)
+		if err != nil {
+			return fmt.Errorf("read plugin %s: %w", tool.Name, err)
+		}
+		assets["plugins/"+tool.Name+".so"] = &fstest.MapFile{Data: data, Mode: 0o700}
+	}
+	return goatcruntime.RunConfig(ctx, cfg, assets)
 }
 
 // Build compiles local plugins and assembles all configured tool providers into

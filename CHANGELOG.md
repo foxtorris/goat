@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `goatc` YAML now supports builtin terminal and asynchronous subagent tools, including optional bubblewrap sandbox configuration.
+- Added `goatc init`, `goatc inspect`, `goatc run`, and runtime-aware validation through `goatc validate --check-runtime`.
+
 ## [0.2.2] - 2026-08-11
 
 ### Highlights
