@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-11
+
 ### Highlights
 
 - Added a dependency-aware plan-and-execute agent that plans multi-step tasks,
@@ -142,7 +144,8 @@ keeping conversation state transitions consistent across storage backends.
 - Contribution, security, code of conduct, and GitHub issue and pull request guidance.
 - Dependabot configuration for Go modules and GitHub Actions.
 
-[Unreleased]: https://github.com/torrischen/goat/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/torrischen/goat/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/torrischen/goat/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/torrischen/goat/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/torrischen/goat/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/torrischen/goat/releases/tag/v0.1.0
