@@ -38,6 +38,24 @@ func TestInitAndInspectCommands(t *testing.T) {
 	}
 }
 
+func TestInspectReportsPlanExecuteAgent(t *testing.T) {
+	cfg := `agent: {type: plan_execute, plan: {max_steps: 4}}
+model: {provider: openai, name: gpt-5}
+tools: [{provider: builtin, name: terminal}]
+`
+	path := filepath.Join(t.TempDir(), "goatc.yaml")
+	if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if err := run([]string{"inspect", "-f", path}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "agent_type: plan_execute") {
+		t.Fatalf("inspect output does not report plan_execute:\n%s", stdout.String())
+	}
+}
+
 func TestInspectExpandsPlanningAndSubagentTools(t *testing.T) {
 	cfg := `model: {provider: openai, name: gpt-5}
 agent: {enable_planning: true}

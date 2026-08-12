@@ -15,10 +15,12 @@ import (
 	"github.com/cloudwego/eino-ext/components/model/agenticgemini"
 	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	filecontext "github.com/torrischen/goat/agent/contextmgr/file"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	sqlitecontext "github.com/torrischen/goat/agent/contextmgr/sqlite"
+	"github.com/torrischen/goat/agent/planexecute"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/goatc/config"
 	"github.com/torrischen/goat/goatc/tui"
@@ -44,22 +46,51 @@ func RunConfig(ctx context.Context, cfg *config.Config, assets fs.FS) error {
 	if err != nil {
 		return err
 	}
-	manager, err := newContextManager(cfg.Context)
+	agent, executor, err := newAgent(ctx, llm, cfg)
 	if err != nil {
 		return err
 	}
-	agent := react.NewAgent(llm, cfg.Agent.ModelMaxTokensK, manager)
-	if cfg.Agent.SkillsDir != "" {
-		agent.AddSkills(ctx)
-	}
 
-	resources, err := loadToolProviders(ctx, agent, cfg, assets)
+	resources, err := loadToolProviders(ctx, executor, cfg, assets)
 	if err != nil {
 		return err
 	}
 	defer closeResources(resources)
 
 	return tui.Run(ctx, agent, cfg)
+}
+
+func newAgent(ctx context.Context, llm model.AgenticModel, cfg *config.Config) (common.Agent, *react.Agent, error) {
+	executorManager, err := newContextManager(cfg.Context)
+	if err != nil {
+		return nil, nil, err
+	}
+	executor := react.NewAgent(llm, cfg.Agent.ModelMaxTokensK, executorManager)
+	if cfg.Agent.SkillsDir != "" {
+		executor.AddSkills(ctx)
+	}
+
+	switch cfg.Agent.Type {
+	case "", config.AgentTypeReact:
+		return executor, executor, nil
+	case config.AgentTypePlanExecute:
+		parentManager, err := newContextManager(cfg.Context)
+		if err != nil {
+			return nil, nil, err
+		}
+		var planCfg *planexecute.Config
+		if cfg.Agent.Plan != nil {
+			planCfg = &planexecute.Config{
+				MaxPlanSteps:     cfg.Agent.Plan.MaxSteps,
+				ExecutorMaxSteps: cfg.Agent.Plan.ExecutorMaxSteps,
+				MaxReplans:       cfg.Agent.Plan.MaxReplans,
+			}
+		}
+		agent := planexecute.NewAgent(llm, executor, parentManager, planCfg)
+		return agent, executor, nil
+	default:
+		return nil, nil, fmt.Errorf("unsupported agent type %q", cfg.Agent.Type)
+	}
 }
 
 // CheckRuntime verifies credentials, sandbox prerequisites, and remote tool providers.

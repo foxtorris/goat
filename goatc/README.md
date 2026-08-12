@@ -114,9 +114,10 @@ version: v1
 
 agent:
   name: ops-agent
+  type: react # react (default) or plan_execute
   model_max_tokens_k: 128
   max_steps: 12
-  enable_planning: true
+  enable_planning: true # ReAct planning tools; omit for plan_execute
   parallel_tools: 3
   compress: true
   skills_dir: ./skills
@@ -153,6 +154,24 @@ build:
 tui:
   welcome: Ask me to investigate an issue.
 ```
+
+To use dependency-aware plan-and-execute orchestration, configure the Agent as follows. The planner creates and may revise a plan, while an internal ReAct executor runs each dependency-ready step with the configured tools.
+
+```yaml
+agent:
+  name: ops-agent
+  type: plan_execute
+  model_max_tokens_k: 128
+  max_steps: 8 # used as the default executor limit
+  parallel_tools: 3
+  compress: true
+  plan:
+    max_steps: 8
+    executor_max_steps: 10
+    max_replans: 2
+```
+
+`agent.enable_planning` is only valid for `react`: it adds planning tools inside a ReAct run. A `plan_execute` Agent uses orchestration-level planning instead. During execution, the TUI displays the generated plan, revisions, active steps, step results, tool calls, and final answer.
 
 Source and output paths are relative to the configuration file. A non-empty `agent.skills_dir` enables skill tools and is passed to every `Agent.Do` run through `AgentDoArgs.SkillsDir`; relative skill paths are resolved from the generated executable's working directory. Skill files are runtime inputs and are not embedded in the executable. Go plugin builds are native-only because Go shared-library plugins cannot be reliably cross-compiled. A configuration containing only gRPC and MCP providers does not build or embed any `.so` files.
 

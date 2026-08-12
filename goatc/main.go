@@ -123,7 +123,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(stdout, "agent_type: react")
+		fmt.Fprintf(stdout, "agent_type: %s\n", cfg.Agent.Type)
 		fmt.Fprintln(stdout, "tools:")
 		for _, name := range inspectToolNames(cfg) {
 			fmt.Fprintf(stdout, "  - %s\n", name)
@@ -199,9 +199,16 @@ version: v1
 
 agent:
   name: goat-agent
+  # react (default) or plan_execute
+  type: react
   max_steps: 8
-  # Enable built-in ReAct planning tools.
+  # Enable built-in planning tools for a ReAct agent.
   enable_planning: false
+  # Plan-and-execute settings (uncomment together with type: plan_execute).
+  # plan:
+  #   max_steps: 8
+  #   executor_max_steps: 8
+  #   max_replans: 2
 
 model:
   provider: openai

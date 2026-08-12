@@ -59,7 +59,7 @@ Local Go tools + gRPC services + MCP servers + goatc.yaml
 - OpenAI, Claude/Anthropic, or Gemini model initialization driven by environment-based credentials.
 - Provider-based tools: compiled and embedded Go plugins, multiple goat gRPC tool services, and MCP servers over stdio, SSE, or Streamable HTTP.
 - RAM, file, or SQLite conversation persistence.
-- Planning, parallel tool execution, context compression, per-run skill directories, and special requirements.
+- ReAct or dependency-aware plan-and-execute orchestration, parallel tool execution, context compression, per-run skill directories, and special requirements.
 - A Bubble Tea interface with streamed answers, live tool status and results, multi-turn history, active-run steering, cancellation, and token accounting.
 
 A minimal project looks like this:
@@ -78,6 +78,7 @@ version: v1
 
 agent:
   name: research-agent
+  type: react # or plan_execute
   model_max_tokens_k: 128
   max_steps: 12
   enable_planning: true
@@ -140,6 +141,8 @@ export OPENAI_API_KEY="your-api-key"
 export MCP_TOKEN="your-mcp-token"
 ./dist/research-agent
 ```
+
+Set `agent.type: plan_execute` and add `agent.plan` settings to have a planner create and revise a dependency-aware plan whose steps are delegated to an internal tool-using ReAct executor. See the complete guide for the plan limits and TUI behavior.
 
 The `tools[].provider` field is the common extension point. `go_plugin` compiles and embeds a local source directory, `grpc` imports a goat `PluginService` by address, and `mcp` initializes a stdio, SSE, or Streamable HTTP server and registers every tool it exposes. Add multiple entries of any provider type in one Agent. MCP values such as `${MCP_TOKEN}` are resolved from the runtime environment, so secrets do not need to be embedded in YAML.
 
