@@ -2,7 +2,7 @@
   <h1>goat 🐐</h1>
   <p><strong>Compile, ship, and extend tool-using AI agents in Go.</strong></p>
   <p>
-    <a href="https://go.dev/"><img alt="Go 1.25.8+" src="https://img.shields.io/badge/Go-1.25.12%2B-00ADD8?logo=go&amp;logoColor=white"></a>
+    <a href="https://go.dev/"><img alt="Go 1.26.6+" src="https://img.shields.io/badge/Go-1.26.6%2B-00ADD8?logo=go&amp;logoColor=white"></a>
     <a href="https://github.com/torrischen/goat/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/torrischen/goat/actions/workflows/ci.yml/badge.svg"></a>
     <a href="https://pkg.go.dev/github.com/torrischen/goat/agent/react"><img alt="Go Reference" src="https://pkg.go.dev/badge/github.com/torrischen/goat/agent/react.svg"></a>
     <a href="LICENSE"><img alt="BSD 3-Clause License" src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg"></a>
@@ -185,7 +185,7 @@ flowchart LR
 
 ## Requirements
 
-- Go **1.25.8** or newer.
+- Go **1.26.6** or newer.
 - Credentials for the model or embedding provider you choose.
 - Milvus **2.6** only when using the retriever packages.
 - CGO and a C compiler when using the SQLite context manager.

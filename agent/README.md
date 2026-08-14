@@ -50,7 +50,7 @@ agent/
 
 ## Installation
 
-The project requires Go 1.25.8 or newer.
+The project requires Go 1.26.6 or newer.
 
 ```bash
 go get github.com/torrischen/goat/agent/react
