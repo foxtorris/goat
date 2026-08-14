@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/agent/planexecute"
 	"github.com/torrischen/goat/goatc/config"
 	"github.com/torrischen/goat/streaming"
 )
@@ -59,6 +60,15 @@ type toolFinishedMsg struct {
 	name   string
 	result string
 }
+
+type planCreatedMsg struct {
+	plan    planexecute.Plan
+	revised bool
+	reason  string
+}
+
+type planStepStartedMsg struct{ step planexecute.Step }
+type planStepCompletedMsg struct{ result planexecute.StepResult }
 
 type runFinishedMsg struct {
 	promptTokens     int
@@ -174,6 +184,33 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "thinking"
 		commands = append(commands, m.waitForEvent())
+	case planCreatedMsg:
+		m.closeAnswer()
+		heading := "Plan"
+		if msg.revised {
+			heading = "Revised plan"
+		}
+		m.appendText(toolStyle.Render(heading+": "+msg.plan.Goal) + "\n")
+		for _, step := range msg.plan.Steps {
+			m.appendText(mutedStyle.Render(fmt.Sprintf("  %s. %s", step.ID, step.Description)) + "\n")
+		}
+		if msg.reason != "" {
+			m.appendText(mutedStyle.Render("  Reason: "+msg.reason) + "\n")
+		}
+		m.status = "plan ready"
+		commands = append(commands, m.waitForEvent())
+	case planStepStartedMsg:
+		m.closeAnswer()
+		m.appendText(toolStyle.Render(fmt.Sprintf("● Step %s", msg.step.ID)) + " " + msg.step.Description + "\n")
+		m.status = "executing step " + msg.step.ID
+		commands = append(commands, m.waitForEvent())
+	case planStepCompletedMsg:
+		result := strings.TrimSpace(msg.result.Output)
+		if result != "" {
+			m.appendText(mutedStyle.Render(abbreviate(result, 500)) + "\n")
+		}
+		m.status = "planning next step"
+		commands = append(commands, m.waitForEvent())
 	case runFinishedMsg:
 		m.closeAnswer()
 		m.running = false
@@ -226,11 +263,13 @@ func (m *model) startRun(runCtx context.Context, cancel context.CancelFunc, text
 		args := &common.AgentDoArgs{
 			ContextUID:          m.contextUID,
 			UserInput:           common.AgentUserInput{Text: text},
-			MaxStep:             m.config.Agent.MaxSteps,
 			EnablePlanning:      m.config.Agent.EnablePlanning,
 			Compress:            m.config.Agent.Compress,
 			SkillsDir:           m.config.Agent.SkillsDir,
 			SpecialRequirements: m.config.Agent.SpecialRequirements,
+		}
+		if m.config.Agent.Type == config.AgentTypeReact {
+			args.MaxStep = m.config.Agent.MaxSteps
 		}
 		if parallel > 0 {
 			args.ToolExecutionOptions = &common.ToolExecutionOptions{EnableParallel: true, MaxConcurrency: parallel}
@@ -267,6 +306,14 @@ func (m *model) startRun(runCtx context.Context, cancel context.CancelFunc, text
 					m.events <- toolFinishedMsg{name: typed.Name, result: typed.Result}
 				case common.ToolCallFailedEvent:
 					m.events <- toolFinishedMsg{name: typed.Name, result: "Error: " + typed.Error}
+				case planexecute.PlanCreatedEvent:
+					m.events <- planCreatedMsg{plan: typed.Plan}
+				case planexecute.PlanRevisedEvent:
+					m.events <- planCreatedMsg{plan: typed.Plan, revised: true, reason: typed.Reason}
+				case planexecute.StepStartedEvent:
+					m.events <- planStepStartedMsg{step: typed.Step}
+				case planexecute.StepCompletedEvent:
+					m.events <- planStepCompletedMsg{result: typed.Result}
 				case common.RunCompletedEvent:
 					terminalSeen = true
 					usage := typed.Usage

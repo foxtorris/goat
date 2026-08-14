@@ -11,6 +11,7 @@ Every item under `tools` selects a provider:
 | `go_plugin` | A Go directory or `.go` file | Compiled as a native `.so` and embedded. One entry represents one `ToolPlugin`. |
 | `grpc` | A goat gRPC tool-plugin address | Connects to one remote `PluginService`. Add multiple entries to import multiple gRPC tools. |
 | `mcp` | An MCP server over stdio, SSE, or Streamable HTTP | Initializes the server and imports every tool returned by `tools/list`. |
+| `builtin` | `terminal` or `subagents` | Registers goat's terminal tool, optionally sandboxed with bubblewrap, or the asynchronous subagent tools. |
 
 For compatibility, an entry with `source` and no `provider` defaults to `go_plugin`.
 
@@ -51,6 +52,18 @@ tools:
     url: https://mcp.example.com/mcp
     headers:
       Authorization: Bearer ${MCP_TOKEN}
+
+  # Built-in tools require no plugin wrapper.
+  - provider: builtin
+    name: terminal
+    sandbox:
+      enabled: true # Linux only; requires bubblewrap.
+      network: false
+      writable_paths: [/workspace]
+      readonly_paths: [/etc/ssl/certs]
+      preserve_env: [HOME]
+  - provider: builtin
+    name: subagents
 
   # Legacy MCP SSE is also supported.
   - provider: mcp
@@ -101,9 +114,10 @@ version: v1
 
 agent:
   name: ops-agent
+  type: react # react (default) or plan_execute
   model_max_tokens_k: 128
   max_steps: 12
-  enable_planning: true
+  enable_planning: true # ReAct planning tools; omit for plan_execute
   parallel_tools: 3
   compress: true
   skills_dir: ./skills
@@ -141,6 +155,24 @@ tui:
   welcome: Ask me to investigate an issue.
 ```
 
+To use dependency-aware plan-and-execute orchestration, configure the Agent as follows. The planner creates and may revise a plan, while an internal ReAct executor runs each dependency-ready step with the configured tools.
+
+```yaml
+agent:
+  name: ops-agent
+  type: plan_execute
+  model_max_tokens_k: 128
+  max_steps: 8 # used as the default executor limit
+  parallel_tools: 3
+  compress: true
+  plan:
+    max_steps: 8
+    executor_max_steps: 10
+    max_replans: 2
+```
+
+`agent.enable_planning` is only valid for `react`: it adds planning tools inside a ReAct run. A `plan_execute` Agent uses orchestration-level planning instead. During execution, the TUI displays the generated plan, revisions, active steps, step results, tool calls, and final answer.
+
 Source and output paths are relative to the configuration file. A non-empty `agent.skills_dir` enables skill tools and is passed to every `Agent.Do` run through `AgentDoArgs.SkillsDir`; relative skill paths are resolved from the generated executable's working directory. Skill files are runtime inputs and are not embedded in the executable. Go plugin builds are native-only because Go shared-library plugins cannot be reliably cross-compiled. A configuration containing only gRPC and MCP providers does not build or embed any `.so` files.
 
 At startup, providers are loaded in this order: local Go plugins, gRPC services, then MCP servers. Startup fails if a configured remote provider cannot initialize or list its tools. MCP clients and stdio subprocesses are closed when the TUI exits.
@@ -149,7 +181,13 @@ At startup, providers are loaded in this order: local Go plugins, gRPC services,
 
 ```bash
 # From a Go module that depends on the same goat version as the tools:
+go run github.com/torrischen/goat/goatc init -f goatc.yaml
 go run github.com/torrischen/goat/goatc validate -f goatc.yaml
+# Also check the API key, remote providers, bubblewrap, and configured paths.
+go run github.com/torrischen/goat/goatc validate -f goatc.yaml --check-runtime
+go run github.com/torrischen/goat/goatc inspect -f goatc.yaml
+# Run directly; local Go plugins are compiled into temporary runtime assets.
+go run github.com/torrischen/goat/goatc run -f goatc.yaml
 go run github.com/torrischen/goat/goatc build -f goatc.yaml
 
 # Override build.output:

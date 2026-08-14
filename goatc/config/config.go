@@ -16,6 +16,14 @@ import (
 // CurrentVersion is the YAML schema version understood by goatc.
 const CurrentVersion = "v1"
 
+// AgentType selects the orchestration strategy used by the generated agent.
+type AgentType string
+
+const (
+	AgentTypeReact       AgentType = "react"
+	AgentTypePlanExecute AgentType = "plan_execute"
+)
+
 // ToolProvider selects how a configured tool source is loaded.
 type ToolProvider string
 
@@ -23,6 +31,12 @@ const (
 	ToolProviderGoPlugin ToolProvider = "go_plugin"
 	ToolProviderGRPC     ToolProvider = "grpc"
 	ToolProviderMCP      ToolProvider = "mcp"
+	ToolProviderBuiltin  ToolProvider = "builtin"
+)
+
+const (
+	BuiltinTerminal  = "terminal"
+	BuiltinSubagents = "subagents"
 )
 
 // MCPTransport selects the transport used to connect to an MCP server.
@@ -47,14 +61,23 @@ type Config struct {
 
 // Agent configures the generated agent loop.
 type Agent struct {
-	Name                string   `yaml:"name"`
-	ModelMaxTokensK     int      `yaml:"model_max_tokens_k,omitempty"`
-	MaxSteps            int      `yaml:"max_steps,omitempty"`
-	EnablePlanning      bool     `yaml:"enable_planning,omitempty"`
-	ParallelTools       int      `yaml:"parallel_tools,omitempty"`
-	Compress            bool     `yaml:"compress,omitempty"`
-	SkillsDir           string   `yaml:"skills_dir,omitempty"`
-	SpecialRequirements []string `yaml:"special_requirements,omitempty"`
+	Name                string      `yaml:"name"`
+	Type                AgentType   `yaml:"type,omitempty"`
+	ModelMaxTokensK     int         `yaml:"model_max_tokens_k,omitempty"`
+	MaxSteps            int         `yaml:"max_steps,omitempty"`
+	EnablePlanning      bool        `yaml:"enable_planning,omitempty"`
+	ParallelTools       int         `yaml:"parallel_tools,omitempty"`
+	Compress            bool        `yaml:"compress,omitempty"`
+	SkillsDir           string      `yaml:"skills_dir,omitempty"`
+	SpecialRequirements []string    `yaml:"special_requirements,omitempty"`
+	Plan                *PlanConfig `yaml:"plan,omitempty"`
+}
+
+// PlanConfig configures plan creation and execution for a plan-and-execute agent.
+type PlanConfig struct {
+	MaxSteps         int `yaml:"max_steps,omitempty"`
+	ExecutorMaxSteps int `yaml:"executor_max_steps,omitempty"`
+	MaxReplans       int `yaml:"max_replans,omitempty"`
 }
 
 // Model configures the generated agent's model provider.
@@ -85,6 +108,18 @@ type Tool struct {
 	URL       string            `yaml:"url,omitempty"`
 	Env       map[string]string `yaml:"env,omitempty"`
 	Headers   map[string]string `yaml:"headers,omitempty"`
+	Sandbox   *Sandbox          `yaml:"sandbox,omitempty"`
+}
+
+// Sandbox configures bubblewrap isolation for the builtin terminal tool.
+type Sandbox struct {
+	Enabled       bool     `yaml:"enabled,omitempty"`
+	BwrapPath     string   `yaml:"bwrap_path,omitempty"`
+	WritablePaths []string `yaml:"writable_paths,omitempty"`
+	ReadOnlyPaths []string `yaml:"readonly_paths,omitempty"`
+	TmpfsSize     string   `yaml:"tmpfs_size,omitempty"`
+	Network       bool     `yaml:"network,omitempty"`
+	PreserveEnv   []string `yaml:"preserve_env,omitempty"`
 }
 
 // Build configures the output artifact.
@@ -138,11 +173,30 @@ func (c *Config) setDefaults() {
 	if c.Agent.Name == "" {
 		c.Agent.Name = "goat-agent"
 	}
+	agentType := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(string(c.Agent.Type))), "-", "_")
+	if agentType == "" {
+		agentType = string(AgentTypeReact)
+	}
+	c.Agent.Type = AgentType(agentType)
 	if c.Agent.ModelMaxTokensK <= 0 {
 		c.Agent.ModelMaxTokensK = 128
 	}
 	if c.Agent.MaxSteps <= 0 {
 		c.Agent.MaxSteps = 8
+	}
+	if c.Agent.Type == AgentTypePlanExecute {
+		if c.Agent.Plan == nil {
+			c.Agent.Plan = &PlanConfig{}
+		}
+		if c.Agent.Plan.MaxSteps <= 0 {
+			c.Agent.Plan.MaxSteps = 8
+		}
+		if c.Agent.Plan.ExecutorMaxSteps <= 0 {
+			c.Agent.Plan.ExecutorMaxSteps = c.Agent.MaxSteps
+		}
+		if c.Agent.Plan.MaxReplans == 0 {
+			c.Agent.Plan.MaxReplans = 2
+		}
 	}
 	c.Agent.SkillsDir = strings.TrimSpace(c.Agent.SkillsDir)
 	if c.Model.APIKeyEnv == "" {
@@ -195,6 +249,30 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Agent.Name) == "" {
 		return fmt.Errorf("agent.name is required")
 	}
+	switch c.Agent.Type {
+	case AgentTypeReact:
+		if c.Agent.Plan != nil {
+			return fmt.Errorf("agent.plan is only valid when agent.type is %q", AgentTypePlanExecute)
+		}
+	case AgentTypePlanExecute:
+		if c.Agent.EnablePlanning {
+			return fmt.Errorf("agent.enable_planning is only valid when agent.type is %q", AgentTypeReact)
+		}
+		if c.Agent.Plan == nil {
+			return fmt.Errorf("agent.plan configuration is required for agent.type %q", AgentTypePlanExecute)
+		}
+		if c.Agent.Plan.MaxSteps <= 0 {
+			return fmt.Errorf("agent.plan.max_steps must be positive")
+		}
+		if c.Agent.Plan.ExecutorMaxSteps <= 0 {
+			return fmt.Errorf("agent.plan.executor_max_steps must be positive")
+		}
+		if c.Agent.Plan.MaxReplans < 0 {
+			return fmt.Errorf("agent.plan.max_replans cannot be negative")
+		}
+	default:
+		return fmt.Errorf("unsupported agent.type %q", c.Agent.Type)
+	}
 	if c.Model.Name == "" {
 		return fmt.Errorf("model.name is required")
 	}
@@ -215,6 +293,7 @@ func (c *Config) Validate() error {
 
 	seenPluginNames := make(map[string]struct{}, len(c.Tools))
 	seenGRPCAddresses := make(map[string]struct{}, len(c.Tools))
+	seenBuiltins := make(map[string]struct{}, len(c.Tools))
 	hasGoPlugins := false
 	for i := range c.Tools {
 		tool := &c.Tools[i]
@@ -236,7 +315,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("duplicate Go plugin name %q", tool.Name)
 			}
 			seenPluginNames[tool.Name] = struct{}{}
-			if tool.Address != "" || tool.Transport != "" || tool.Command != "" || len(tool.Args) > 0 || tool.URL != "" || len(tool.Env) > 0 || len(tool.Headers) > 0 {
+			if tool.Address != "" || tool.Transport != "" || tool.Command != "" || len(tool.Args) > 0 || tool.URL != "" || len(tool.Env) > 0 || len(tool.Headers) > 0 || tool.Sandbox != nil {
 				return fmt.Errorf("tools[%d] contains options that are not valid for provider %q", i, tool.Provider)
 			}
 		case ToolProviderGRPC:
@@ -248,13 +327,21 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("duplicate gRPC tool address %q", tool.Address)
 			}
 			seenGRPCAddresses[tool.Address] = struct{}{}
-			if tool.Source != "" || tool.Transport != "" || tool.Command != "" || len(tool.Args) > 0 || tool.URL != "" || len(tool.Env) > 0 || len(tool.Headers) > 0 {
+			if tool.Source != "" || tool.Transport != "" || tool.Command != "" || len(tool.Args) > 0 || tool.URL != "" || len(tool.Env) > 0 || len(tool.Headers) > 0 || tool.Sandbox != nil {
 				return fmt.Errorf("tools[%d] contains options that are not valid for provider %q", i, tool.Provider)
 			}
 		case ToolProviderMCP:
 			if err := validateMCPTool(i, tool); err != nil {
 				return err
 			}
+		case ToolProviderBuiltin:
+			if err := validateBuiltinTool(i, tool); err != nil {
+				return err
+			}
+			if _, exists := seenBuiltins[tool.Name]; exists {
+				return fmt.Errorf("duplicate builtin tool %q", tool.Name)
+			}
+			seenBuiltins[tool.Name] = struct{}{}
 		default:
 			return fmt.Errorf("unsupported tools[%d].provider %q", i, tool.Provider)
 		}
@@ -280,8 +367,34 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+func validateBuiltinTool(index int, tool *Tool) error {
+	tool.Name = strings.ToLower(strings.TrimSpace(tool.Name))
+	if tool.Name != BuiltinTerminal && tool.Name != BuiltinSubagents {
+		return fmt.Errorf("unsupported builtin tool %q at tools[%d]", tool.Name, index)
+	}
+	if tool.Source != "" || tool.Address != "" || tool.Transport != "" || tool.Command != "" || len(tool.Args) > 0 || tool.URL != "" || len(tool.Env) > 0 || len(tool.Headers) > 0 {
+		return fmt.Errorf("tools[%d] contains options that are not valid for builtin %q", index, tool.Name)
+	}
+	if tool.Name == BuiltinSubagents && tool.Sandbox != nil {
+		return fmt.Errorf("tools[%d].sandbox is only valid for builtin terminal", index)
+	}
+	if tool.Sandbox != nil {
+		for _, path := range append(append([]string{}, tool.Sandbox.WritablePaths...), tool.Sandbox.ReadOnlyPaths...) {
+			if strings.TrimSpace(path) == "" {
+				return fmt.Errorf("tools[%d].sandbox contains an empty path", index)
+			}
+		}
+		for _, name := range tool.Sandbox.PreserveEnv {
+			if strings.TrimSpace(name) == "" || strings.Contains(name, "=") {
+				return fmt.Errorf("tools[%d].sandbox contains an invalid environment variable name %q", index, name)
+			}
+		}
+	}
+	return nil
+}
+
 func validateMCPTool(index int, tool *Tool) error {
-	if tool.Source != "" || tool.Address != "" {
+	if tool.Source != "" || tool.Address != "" || tool.Sandbox != nil {
 		return fmt.Errorf("tools[%d] contains options that are not valid for provider %q", index, tool.Provider)
 	}
 	for key := range tool.Env {

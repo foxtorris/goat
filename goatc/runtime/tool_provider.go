@@ -12,6 +12,7 @@ import (
 	mcptransport "github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/torrischen/goat/agent/react"
+	agenttools "github.com/torrischen/goat/agent/tools"
 	"github.com/torrischen/goat/goatc/config"
 )
 
@@ -22,6 +23,7 @@ type toolProvider interface {
 type goPluginProvider struct{}
 type grpcProvider struct{}
 type mcpProvider struct{}
+type builtinProvider struct{}
 
 type closeFunc func() error
 
@@ -31,11 +33,13 @@ var toolProviders = map[config.ToolProvider]toolProvider{
 	config.ToolProviderGoPlugin: goPluginProvider{},
 	config.ToolProviderGRPC:     grpcProvider{},
 	config.ToolProviderMCP:      mcpProvider{},
+	config.ToolProviderBuiltin:  builtinProvider{},
 }
 
 var toolProviderOrder = []config.ToolProvider{
 	config.ToolProviderGoPlugin,
 	config.ToolProviderGRPC,
+	config.ToolProviderBuiltin,
 	config.ToolProviderMCP,
 }
 
@@ -87,6 +91,38 @@ func (goPluginProvider) Load(
 		return nil, err
 	}
 	return []io.Closer{closeFunc(func() error { return os.RemoveAll(pluginDir) })}, nil
+}
+
+func (builtinProvider) Load(
+	ctx context.Context,
+	agent *react.Agent,
+	configured []config.Tool,
+	_ fs.FS,
+	_ string,
+) ([]io.Closer, error) {
+	for _, configuredTool := range configured {
+		switch configuredTool.Name {
+		case config.BuiltinTerminal:
+			if configuredTool.Sandbox == nil || !configuredTool.Sandbox.Enabled {
+				agent.AddTool(ctx, agenttools.Terminal())
+				continue
+			}
+			sandbox := configuredTool.Sandbox
+			agent.AddTool(ctx, agenttools.TerminalWithSandbox(agenttools.SandboxConfig{
+				BwrapPath:     sandbox.BwrapPath,
+				AllowedPaths:  append([]string(nil), sandbox.WritablePaths...),
+				ReadOnlyPaths: append([]string(nil), sandbox.ReadOnlyPaths...),
+				TmpfsSize:     sandbox.TmpfsSize,
+				NetworkAccess: sandbox.Network,
+				PreserveEnv:   append([]string(nil), sandbox.PreserveEnv...),
+			}))
+		case config.BuiltinSubagents:
+			agent.AddTools(ctx, agenttools.SpawnSubAgent(agent), agenttools.GetSubAgentStatus())
+		default:
+			return nil, fmt.Errorf("unsupported builtin tool %q", configuredTool.Name)
+		}
+	}
+	return nil, nil
 }
 
 func (grpcProvider) Load(
