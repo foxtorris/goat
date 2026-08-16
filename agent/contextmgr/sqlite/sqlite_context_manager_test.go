@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/torrischen/goat/agent/common"
@@ -63,7 +65,7 @@ VALUES (?, 0, ?)`,
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := store.Load(context.Background(), "legacy")
+	state, err := readSQLiteView(context.Background(), store, "legacy", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +116,7 @@ func TestSQLiteStoreMigratesLegacyContextOnFirstCAS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	state, err := store.Load(ctx, contextUID)
+	state, err := readSQLiteView(ctx, store, contextUID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,11 +143,99 @@ func TestSQLiteStoreMigratesLegacyContextOnFirstCAS(t *testing.T) {
 	}
 }
 
+func TestSQLiteAppendPersistsOnlyEventDelta(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "context.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.Create(ctx, contextmgr.CreateRequest{InitialMessages: []*schema.AgenticMessage{
+		schema.UserAgenticMessage("baseline-only-content"),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextUID := created.ContextUID
+	var before contextConversation
+	if err := store.db.WithContext(ctx).Where("context_uid = ?", contextUID.String()).Take(&before).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, contextmgr.AppendRequest{
+		ContextUID: contextUID, ExpectedRevision: 1,
+		Events: []contextmgr.Event{{
+			Type:     contextmgr.EventMessagesAppended,
+			Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("delta-only-content")},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var after contextConversation
+	if err := store.db.WithContext(ctx).Where("context_uid = ?", contextUID.String()).Take(&after).Error; err != nil {
+		t.Fatal(err)
+	}
+	if after.StatePayload != before.StatePayload {
+		t.Fatal("Append rewrote the baseline state payload")
+	}
+	var event contextEvent
+	if err := store.db.WithContext(ctx).Where("context_uid = ?", contextUID.String()).Take(&event).Error; err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(event.Payload, "baseline-only-content") || !strings.Contains(event.Payload, "delta-only-content") {
+		t.Fatalf("event payload is not incremental: %s", event.Payload)
+	}
+}
+
+func TestSQLiteCheckpointPreservesHistoricalReads(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "context.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.Create(ctx, contextmgr.CreateRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextUID := created.ContextUID
+	for revision := uint64(1); revision < contextmgr.CheckpointInterval; revision++ {
+		if _, err := store.Append(ctx, contextmgr.AppendRequest{
+			ContextUID: contextUID, ExpectedRevision: revision,
+			Events: []contextmgr.Event{{
+				Type:     contextmgr.EventMessagesAppended,
+				Messages: []*schema.AgenticMessage{schema.UserAgenticMessage(fmt.Sprintf("message-%d", revision+1))},
+			}},
+		}); err != nil {
+			t.Fatalf("Append revision %d: %v", revision+1, err)
+		}
+	}
+	var count int64
+	if err := store.db.Model(&contextCheckpoint{}).Where("context_uid = ?", contextUID.String()).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("checkpoint count = %d", count)
+	}
+	current, err := readSQLiteView(ctx, store, contextUID, 0)
+	if err != nil || current.Revision != contextmgr.CheckpointInterval || len(current.Messages) != 63 {
+		t.Fatalf("Load() = %+v, %v", current, err)
+	}
+	historical, err := readSQLiteView(ctx, store, contextUID, contextmgr.CheckpointInterval-1)
+	if err != nil || historical.Revision != contextmgr.CheckpointInterval-1 || len(historical.Messages) != 62 {
+		t.Fatalf("LoadAt(63) = %+v, %v", historical, err)
+	}
+}
+
 func TestNewSQLiteContextManager(t *testing.T) {
 	manager, err := NewSQLiteContextManager(filepath.Join(t.TempDir(), "context.sqlite"))
 	if err != nil || manager == nil {
 		t.Fatalf("NewSQLiteContextManager() = %v, %v", manager, err)
 	}
+}
+
+func readSQLiteView(ctx context.Context, store *SQLiteStore, contextUID common.ContextUID, revision uint64) (*contextmgr.ContextView, error) {
+	view, err := store.ReadView(ctx, contextmgr.ReadViewRequest{
+		ContextUID: contextUID, Revision: revision, IncludePending: true, IncludeRuns: true,
+	})
+	return &view, err
 }
 
 func mustEncode(t *testing.T, value any) string {

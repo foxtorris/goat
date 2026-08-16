@@ -27,34 +27,33 @@ type scriptedEventModel struct {
 }
 
 type failingSettleStore struct {
-	delegate contextmgr.Store
+	delegate contextmgr.ContextStore
 	err      error
 }
 
-func (s *failingSettleStore) Create(
-	ctx context.Context,
-	state *contextmgr.State,
-) (common.ContextUID, error) {
-	return s.delegate.Create(ctx, state)
+func (s *failingSettleStore) Create(ctx context.Context, request contextmgr.CreateRequest) (contextmgr.CreateResult, error) {
+	return s.delegate.Create(ctx, request)
 }
 
-func (s *failingSettleStore) Load(
-	ctx context.Context,
-	contextUID common.ContextUID,
-) (*contextmgr.State, error) {
-	return s.delegate.Load(ctx, contextUID)
+func (s *failingSettleStore) ReadHead(ctx context.Context, contextUID common.ContextUID) (contextmgr.ContextHead, error) {
+	return s.delegate.ReadHead(ctx, contextUID)
 }
 
-func (s *failingSettleStore) CompareAndSwap(
-	ctx context.Context,
-	contextUID common.ContextUID,
-	expectedRevision uint64,
-	state *contextmgr.State,
-) error {
-	if len(state.RunSnapshots) > 0 {
-		return s.err
+func (s *failingSettleStore) Append(ctx context.Context, request contextmgr.AppendRequest) (contextmgr.AppendResult, error) {
+	for _, event := range request.Events {
+		if event.Type == contextmgr.EventRunSettled {
+			return contextmgr.AppendResult{}, s.err
+		}
 	}
-	return s.delegate.CompareAndSwap(ctx, contextUID, expectedRevision, state)
+	return s.delegate.Append(ctx, request)
+}
+
+func (s *failingSettleStore) ReadEvents(ctx context.Context, contextUID common.ContextUID, fromRevision uint64) ([]contextmgr.RevisionedEvent, error) {
+	return s.delegate.ReadEvents(ctx, contextUID, fromRevision)
+}
+
+func (s *failingSettleStore) ReadView(ctx context.Context, request contextmgr.ReadViewRequest) (contextmgr.ContextView, error) {
+	return s.delegate.ReadView(ctx, request)
 }
 
 func (s *failingSettleStore) Delete(ctx context.Context, contextUID common.ContextUID) error {
@@ -605,12 +604,14 @@ func mustLoadHistory(
 func assertRunOutcome(
 	t *testing.T,
 	ctx context.Context,
-	store contextmgr.Store,
+	store contextmgr.ContextStore,
 	signature common.RunSignature,
 	want contextmgr.RunOutcome,
 ) {
 	t.Helper()
-	state, err := store.Load(ctx, signature.ContextUID)
+	state, err := store.ReadView(ctx, contextmgr.ReadViewRequest{
+		ContextUID: signature.ContextUID, IncludePending: true, IncludeRuns: true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

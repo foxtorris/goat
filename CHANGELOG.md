@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `goatc` YAML now supports builtin terminal and asynchronous subagent tools, including optional bubblewrap sandbox configuration.
 - Added `goatc init`, `goatc inspect`, `goatc run`, and runtime-aware validation through `goatc validate --check-runtime`.
 
+### Changed
+
+- **Breaking:** replaced `contextmgr.Store` with `ContextStore`, separating lightweight `ContextHead` mutation state from on-demand `ContextView` reads. Mutations now use revision-based CAS through `ReadHead` and `Append`; `ReadEvents` exposes incremental log suffixes, while `ReadView` handles latest and historical materialization. SQLite and MySQL atomically update head, pending/run projections, events, and checkpoints, so ordinary mutations no longer load complete conversation history. Existing file and SQL state payloads remain readable without an offline migration.
+
 ### Fixed
 
 - Raised the minimum Go version to `1.26.6`, fixing the reachable standard-library vulnerabilities reported by `govulncheck`.
