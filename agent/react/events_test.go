@@ -88,6 +88,35 @@ func (m *scriptedEventModel) Stream(
 	return schema.StreamReaderFromArray(response), nil
 }
 
+func TestDoCreatesMissingContextUID(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	store := ram.NewRAMStore()
+	manager := contextmgr.NewManager(store)
+	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{common.AssistantTextMessage("done")}}}, 128, manager)
+	wantedUID := common.ContextUID("provided-context")
+
+	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+		ContextUID: wantedUID,
+		UserInput:  common.AgentUserInput{Text: "start this context"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readAllEvents(t, ctx, eventStream)
+	if signature.ContextUID != wantedUID {
+		t.Fatalf("ContextUID = %q, want %q", signature.ContextUID, wantedUID)
+	}
+	history, err := manager.Load(ctx, wantedUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("history count = %d, want system, user, final", len(history))
+	}
+}
+
 func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

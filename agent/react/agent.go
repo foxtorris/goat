@@ -595,7 +595,14 @@ func (a *Agent) Do(
 		// Restore the managed conversation history.
 		var err error
 		messages, err = a.contextManager.Load(ctx, contextUID)
-		if err != nil {
+		if errors.Is(err, contextmgr.ErrContextNotFound) {
+			systemMessage := schema.SystemAgenticMessage(systemPrompt)
+			if err := a.contextManager.CreateWithUID(ctx, contextUID, []*schema.AgenticMessage{systemMessage}); err != nil {
+				return common.RunSignature{}, nil, fmt.Errorf("failed to create conversation %s: %w", contextUID, err)
+			}
+			messages = []*schema.AgenticMessage{systemMessage}
+			logging.Infof("Agent.Do: initialized new conversation %s", contextUID)
+		} else if err != nil {
 			return common.RunSignature{}, nil, fmt.Errorf("failed to load conversation: %w", err)
 		}
 		if len(messages) == 0 {
