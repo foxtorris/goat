@@ -40,6 +40,8 @@ type ContextHead struct {
 
 // CreateRequest describes a new context. Initial messages become revision 1.
 type CreateRequest struct {
+	// ContextUID is optional. When empty, the store generates one.
+	ContextUID      common.ContextUID
 	InitialMessages []*schema.AgenticMessage
 	RunSnapshots    map[common.RunUID]RunSnapshot
 }
@@ -179,6 +181,22 @@ func (m *Manager) Create(ctx context.Context, initialMessages []*schema.AgenticM
 	}
 	result, err := m.store.Create(ctx, CreateRequest{InitialMessages: common.CloneAgenticMessages(initialMessages)})
 	return result.ContextUID, err
+}
+
+func (m *Manager) CreateWithUID(ctx context.Context, contextUID common.ContextUID, initialMessages []*schema.AgenticMessage) error {
+	if contextUID == "" {
+		return fmt.Errorf("context UID must not be empty")
+	}
+	if err := validateMessages(initialMessages); err != nil {
+		return err
+	}
+	if m == nil || m.store == nil {
+		return ErrStoreUnavailable
+	}
+	_, err := m.store.Create(ctx, CreateRequest{
+		ContextUID: contextUID, InitialMessages: common.CloneAgenticMessages(initialMessages),
+	})
+	return err
 }
 
 func (m *Manager) Load(ctx context.Context, contextUID common.ContextUID) ([]*schema.AgenticMessage, error) {

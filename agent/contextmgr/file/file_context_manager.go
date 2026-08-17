@@ -76,7 +76,7 @@ func (s *FileStore) Create(ctx context.Context, request contextmgr.CreateRequest
 	for runUID, snapshot := range request.RunSnapshots {
 		state.RunSnapshots[runUID] = snapshot
 	}
-	contextUID, err := s.createState(ctx, state)
+	contextUID, err := s.createState(ctx, request.ContextUID, state)
 	if err != nil {
 		return contextmgr.CreateResult{}, err
 	}
@@ -166,14 +166,17 @@ func (s *FileStore) ReadView(ctx context.Context, request contextmgr.ReadViewReq
 	return *state, nil
 }
 
-func (s *FileStore) createState(ctx context.Context, state *contextmgr.State) (common.ContextUID, error) {
+func (s *FileStore) createState(ctx context.Context, requestedUID common.ContextUID, state *contextmgr.State) (common.ContextUID, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	contextUID := common.ContextUID(uuid.NewString())
+	contextUID := requestedUID
+	if contextUID == "" {
+		contextUID = common.ContextUID(uuid.NewString())
+	}
 	next := state.Clone()
 	next.Revision = 1
 	if err := s.persistState(contextUID, next); err != nil {

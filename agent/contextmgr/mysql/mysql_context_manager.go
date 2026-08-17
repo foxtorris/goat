@@ -121,7 +121,10 @@ func (s *MysqlStore) Create(ctx context.Context, request contextmgr.CreateReques
 	if err := ctx.Err(); err != nil {
 		return contextmgr.CreateResult{}, err
 	}
-	contextUID := common.ContextUID(uuid.NewString())
+	contextUID := request.ContextUID
+	if contextUID == "" {
+		contextUID = common.ContextUID(uuid.NewString())
+	}
 	state := contextmgr.NewState(request.InitialMessages)
 	for runUID, snapshot := range request.RunSnapshots {
 		state.RunSnapshots[runUID] = snapshot

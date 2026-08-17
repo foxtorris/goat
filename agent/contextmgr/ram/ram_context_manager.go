@@ -49,12 +49,19 @@ func (s *RAMStore) Create(ctx context.Context, request contextmgr.CreateRequest)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var contextUID common.ContextUID
-	for {
-		contextUID = common.ContextUID(uuid.NewString())
-		if _, exists := s.streams[contextUID]; !exists {
-			break
+	contextUID := request.ContextUID
+	if contextUID == "" {
+		for {
+			contextUID = common.ContextUID(uuid.NewString())
+			if _, exists := s.streams[contextUID]; !exists {
+				break
+			}
 		}
+	} else if _, exists := s.streams[contextUID]; exists {
+		return contextmgr.CreateResult{}, fmt.Errorf("context %s already exists", contextUID)
+	}
+	if contextUID == "" {
+		return contextmgr.CreateResult{}, fmt.Errorf("context UID must not be empty")
 	}
 	state.ContextUID = contextUID
 	head := headFromState(contextUID, state)
