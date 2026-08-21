@@ -165,9 +165,9 @@ func compressPrecise(
 	compressedMessages = append(compressedMessages, checkpointMessage)
 	compressedMessages = append(compressedMessages, toKeep...)
 
-	promptTokens, completionTokens, cachedTokens := messageTokens(raw)
+	promptTokens, cachedTokens, completionTokens := messageTokens(raw)
 	logging.Infof("Precisely compressed %d messages to %d messages", len(messages), len(compressedMessages))
-	return compressedMessages, promptTokens, completionTokens, cachedTokens, nil
+	return compressedMessages, promptTokens, cachedTokens, completionTokens, nil
 }
 
 func detachContextCheckpoint(messages []*schema.AgenticMessage) (*contextCheckpoint, []*schema.AgenticMessage) {
