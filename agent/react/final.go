@@ -46,7 +46,7 @@ func (a *Agent) generateFinalAnswer(
 		return "", nil, fmt.Errorf("final model call: %w", err)
 	}
 
-	promptTokens, cachedTokens, completionTokens := messageTokens(raw)
+	promptTokens, completionTokens, cachedTokens := messageTokens(raw)
 	usage := common.NewAgentUsage(promptTokens, cachedTokens, completionTokens)
 	if err := events.WriteWithContext(ctx, common.ModelCallCompletedEvent{
 		Phase: common.ModelCallPhaseFinal,
