@@ -467,6 +467,11 @@ func (a *Agent) finalAnswer(
 			continue
 		}
 		chunks = append(chunks, chunk)
+		if delta := messageReasoning(chunk); delta != "" {
+			if err := events.WriteWithContext(ctx, common.ReasoningDeltaEvent{Delta: delta}); err != nil {
+				return "", nil, err
+			}
+		}
 		if delta := messageText(chunk); delta != "" {
 			if err := events.WriteWithContext(ctx, common.AssistantTextDeltaEvent{Delta: delta}); err != nil {
 				return "", nil, err
@@ -554,6 +559,19 @@ func messageText(message *schema.AgenticMessage) string {
 		}
 		if block.UserInputText != nil {
 			builder.WriteString(block.UserInputText.Text)
+		}
+	}
+	return builder.String()
+}
+
+func messageReasoning(message *schema.AgenticMessage) string {
+	if message == nil {
+		return ""
+	}
+	var builder strings.Builder
+	for _, block := range message.ContentBlocks {
+		if block != nil && block.Reasoning != nil {
+			builder.WriteString(block.Reasoning.Text)
 		}
 	}
 	return builder.String()

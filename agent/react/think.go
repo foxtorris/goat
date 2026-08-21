@@ -177,6 +177,11 @@ func (a *Agent) streamModelResponse(
 		}
 
 		chunks = append(chunks, chunk)
+		if delta := messageReasoning(chunk); delta != "" {
+			if err := events.WriteWithContext(ctx, common.ReasoningDeltaEvent{Delta: delta}); err != nil {
+				return nil, err
+			}
+		}
 		if delta := assistantText(chunk); delta != "" {
 			if err := events.WriteWithContext(ctx, common.AssistantTextDeltaEvent{Delta: delta}); err != nil {
 				return nil, err

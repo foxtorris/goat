@@ -12,6 +12,7 @@ const (
 	AgentEventTypeRunStarted                  AgentEventType = "run_started"
 	AgentEventTypeModelCallStarted            AgentEventType = "model_call_started"
 	AgentEventTypeAssistantTextDelta          AgentEventType = "assistant_text_delta"
+	AgentEventTypeReasoningDelta              AgentEventType = "reasoning_delta"
 	AgentEventTypeModelCallCompleted          AgentEventType = "model_call_completed"
 	AgentEventTypeModelCallFailed             AgentEventType = "model_call_failed"
 	AgentEventTypeContextCompressionStarted   AgentEventType = "context_compression_started"
@@ -67,6 +68,12 @@ type AssistantTextDeltaEvent struct {
 }
 
 func (AssistantTextDeltaEvent) Type() AgentEventType { return AgentEventTypeAssistantTextDelta }
+
+type ReasoningDeltaEvent struct {
+	Delta string `json:"delta"`
+}
+
+func (ReasoningDeltaEvent) Type() AgentEventType { return AgentEventTypeReasoningDelta }
 
 type ModelCallCompletedEvent struct {
 	Phase        ModelCallPhase `json:"phase"`

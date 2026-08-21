@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
+	"github.com/cloudwego/eino/schema"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/util/logging"
-	"github.com/cloudwego/eino/schema"
 )
 
 // AgentCallbacks defines callback functions for agent lifecycle events
@@ -101,10 +101,10 @@ type CallbackRunCanceledArgs struct {
 
 // CallbackThinkStartArgs arguments for think start
 type CallbackThinkStartArgs struct {
-	Signature       common.RunSignature
-	Iteration       int
-	MessageCount    int
-	WillCompress    bool
+	Signature    common.RunSignature
+	Iteration    int
+	MessageCount int
+	WillCompress bool
 }
 
 // CallbackThinkCompleteArgs arguments for think complete
@@ -184,11 +184,11 @@ type CallbackSteeringAppliedArgs struct {
 
 // CallbackCompressionCompleteArgs arguments for compression complete
 type CallbackCompressionCompleteArgs struct {
-	Signature            common.RunSignature
-	Iteration            int
-	OriginalMessageCount int
+	Signature              common.RunSignature
+	Iteration              int
+	OriginalMessageCount   int
 	CompressedMessageCount int
-	Usage                *common.AgentUsage
+	Usage                  *common.AgentUsage
 }
 
 // safeCallback safely invokes a callback function, preventing panics
