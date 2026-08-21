@@ -4,7 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.3] - 2026-08-21
+
+### Highlights
+
+- Simplified the public Agent event stream around run lifecycle, reasoning and
+  assistant output, tool execution, final-answer confirmation, aggregate usage,
+  and terminal outcomes.
+- Added an English Agent lifecycle reference at
+  `agent/react/agent-lifecycle.md`, including React and plan-execute event
+  flows.
 
 ### Added
 
@@ -15,6 +24,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the public `common.AgentEvent` set no longer includes model-call
+  phase, context-compression, steering, or tool-request events. Model-call
+  details remain available through React callbacks or internal metrics.
+  `ReasoningDeltaEvent` and `AssistantTextDeltaEvent` are separate output
+  channels, and `ToolCallStartedEvent` represents the beginning of execution.
 - **Breaking:** replaced `contextmgr.Store` with `ContextStore`, separating lightweight `ContextHead` mutation state from on-demand `ContextView` reads. Mutations now use revision-based CAS through `ReadHead` and `Append`; `ReadEvents` exposes incremental log suffixes, while `ReadView` handles latest and historical materialization. SQLite and MySQL atomically update head, pending/run projections, events, and checkpoints, so ordinary mutations no longer load complete conversation history. Existing file and SQL state payloads remain readable without an offline migration.
 - Simplified React agent planning prompt by consolidating 14 verbose constants into 4 concise ones, reducing planning prompt tokens by ~77% (~1,698 tokens per run) while preserving all core logic including decision boundaries, information gathering rules, granularity guidelines, and mandatory update requirements.
 
@@ -160,7 +174,8 @@ keeping conversation state transitions consistent across storage backends.
 - Contribution, security, code of conduct, and GitHub issue and pull request guidance.
 - Dependabot configuration for Go modules and GitHub Actions.
 
-[Unreleased]: https://github.com/torrischen/goat/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/torrischen/goat/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/torrischen/goat/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/torrischen/goat/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/torrischen/goat/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/torrischen/goat/compare/v0.1.0...v0.2.0

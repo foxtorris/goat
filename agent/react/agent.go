@@ -713,10 +713,6 @@ func (a *Agent) Do(
 		})
 	}
 	if len(appliedBeforeRun) > 0 {
-		if err := eventStream.WriteWithContext(ctx, common.SteeringAppliedEvent{Count: len(appliedBeforeRun)}); err != nil {
-			_ = eventStream.Close()
-			return common.RunSignature{}, nil, fmt.Errorf("write steering applied event: %w", err)
-		}
 		// Callback: OnSteeringApplied
 		if cbs != nil && cbs.OnSteeringApplied != nil {
 			_ = safeCallback(actx, "OnSteeringApplied", func() error {
@@ -899,14 +895,6 @@ func (a *Agent) Do(
 						item.execute = true
 					}
 					prepared[i] = item
-
-					if err := eventStream.WriteWithContext(actx, common.ToolCallRequestedEvent{
-						CallID:    toolCall.CallID,
-						Name:      toolCall.Name,
-						Arguments: cloneToolArguments(item.arguments),
-					}); err != nil {
-						return operationError("write tool requested event", err)
-					}
 
 					// Callback: OnToolCallRequested
 					if cbs != nil && cbs.OnToolCallRequested != nil {
@@ -1126,11 +1114,6 @@ func (a *Agent) Do(
 						len(appliedSteering),
 						contextUID,
 					)
-					if err := eventStream.WriteWithContext(actx, common.SteeringAppliedEvent{
-						Count: len(appliedSteering),
-					}); err != nil {
-						return operationError("write steering applied event", err)
-					}
 
 					// Callback: OnSteeringApplied (after iteration)
 					if cbs != nil && cbs.OnSteeringApplied != nil {

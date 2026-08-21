@@ -191,7 +191,7 @@ func OpenAIAgentInterruptTest() {
 		panic(err)
 	}
 
-	var toolRequested *common.ToolCallRequestedEvent
+	var toolStarted *common.ToolCallStartedEvent
 	var toolCompleted *common.ToolCallCompletedEvent
 	var usage *common.AgentUsage
 	interrupted := false
@@ -206,10 +206,10 @@ func OpenAIAgentInterruptTest() {
 		switch typed := event.(type) {
 		case common.FinalAnswerCompletedEvent:
 			panic(fmt.Sprintf("unexpected final answer before interrupt: %s", typed.Answer))
-		case common.ToolCallRequestedEvent:
+		case common.ToolCallStartedEvent:
 			if typed.Name == approvalToolName {
 				copy := typed
-				toolRequested = &copy
+				toolStarted = &copy
 			}
 		case common.ToolCallCompletedEvent:
 			if typed.Name == approvalToolName {
@@ -221,7 +221,7 @@ func OpenAIAgentInterruptTest() {
 			usage = typed.Usage
 		}
 	}
-	if toolRequested == nil || toolCompleted == nil || !interrupted {
+	if toolStarted == nil || toolCompleted == nil || !interrupted {
 		panic("approval tool events or interrupted terminal event were not streamed")
 	}
 	if usage == nil {
@@ -230,8 +230,8 @@ func OpenAIAgentInterruptTest() {
 
 	fmt.Println("conversation:", signature.ContextUID)
 	fmt.Println("run:", signature.RunUID)
-	fmt.Printf("interrupt tool: %s\n", toolRequested.Name)
-	fmt.Printf("tool input: %+v\n", toolRequested.Arguments)
+	fmt.Printf("interrupt tool: %s\n", toolStarted.Name)
+	fmt.Printf("tool input: %+v\n", toolStarted.Arguments)
 	fmt.Printf("tool observation: %s\n", toolCompleted.Result)
 	messages, err := manager.Load(ctx, signature.ContextUID)
 	if err != nil {

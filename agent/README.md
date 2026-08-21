@@ -442,7 +442,7 @@ See the [tool plugin cookbook](toolplugin/README.md) for plugin interfaces, buil
 
 ### Reading the event stream
 
-`Do` keeps its single-call shape and returns `streaming.Stream[common.AgentEvent]`. The runtime submits concrete event values directly to this stream, and consumers use a Go type switch without an emitter API or an additional event envelope.
+`Do` keeps its single-call shape and returns `streaming.Stream[common.AgentEvent]`. The public stream uses concrete event types for user-observable semantics; consumers do not need to inspect a model-call phase or maintain a model-call state machine.
 
 ```go
 signature, eventStream, err := agent.Do(ctx, args)
@@ -459,10 +459,12 @@ for {
 	}
 
 	switch event := event.(type) {
+	case common.ReasoningDeltaEvent:
+		renderThinking(event.Delta)
 	case common.AssistantTextDeltaEvent:
-		fmt.Print(event.Delta)
-	case common.ToolCallRequestedEvent:
-		fmt.Printf("tool requested: %s(%v)\n", event.Name, event.Arguments)
+		renderAnswer(event.Delta)
+	case common.ToolCallStartedEvent:
+		fmt.Printf("tool started: %s(%v)\n", event.Name, event.Arguments)
 	case common.ToolCallCompletedEvent:
 		fmt.Printf("tool completed: %s -> %s\n", event.Name, event.Result)
 	case common.ToolCallFailedEvent:
@@ -475,17 +477,17 @@ for {
 }
 ```
 
-The event families are:
+The public event set is:
 
 | Family | Events |
 | --- | --- |
 | Run lifecycle | `RunStartedEvent`, `RunCompletedEvent`, `RunInterruptedEvent`, `RunCanceledEvent`, `RunFailedEvent` |
-| Model calls | `ModelCallStartedEvent`, `AssistantTextDeltaEvent`, `ModelCallCompletedEvent`, `ModelCallFailedEvent` |
-| Context compression | `ContextCompressionStartedEvent`, `ContextCompressionCompletedEvent`, `ContextCompressionFailedEvent` |
-| Tool calls | `ToolCallRequestedEvent`, `ToolCallStartedEvent`, `ToolCallCompletedEvent`, `ToolCallFailedEvent` |
-| Steering and answer | `SteeringAppliedEvent`, `FinalAnswerCompletedEvent` |
+| Output | `ReasoningDeltaEvent`, `AssistantTextDeltaEvent`, `FinalAnswerCompletedEvent` |
+| Tool execution | `ToolCallStartedEvent`, `ToolCallCompletedEvent`, `ToolCallFailedEvent` |
 
-`AssistantTextDeltaEvent` is the generic live text event for streamed model calls. `FinalAnswerCompletedEvent` carries the settled answer only after it has been committed to conversation history. `ModelCallCompletedEvent.Usage` is scoped to one model call; each terminal event's `Usage` is the aggregate for the run. With parallel tools, completion and failure events arrive in actual completion order, while tool-result messages sent back to the model retain the model's original request order.
+`ReasoningDeltaEvent` and `AssistantTextDeltaEvent` are separate output channels. A UI can render the former as gray or collapsible thinking and the latter as normal assistant text. `FinalAnswerCompletedEvent` is the authoritative confirmation that the answer has been settled and committed to conversation history. The terminal event's `Usage` is the aggregate for the run. With parallel tools, completion and failure events arrive in actual completion order, while tool-result messages sent back to the model retain the model's original request order.
+
+Model-call phase, compression, steering, and tool-request details are not public stream events. Use React callbacks or internal logging when those implementation details are required for metrics, auditing, or approval workflows.
 
 Always inspect the terminal event. A stream close is only the transport boundary; `RunFailedEvent` is how asynchronous model, persistence, or runtime failures are surfaced after `Do` has returned.
 
@@ -534,5 +536,5 @@ go test ./agent/react/... ./agent/tools ./agent/contextmgr/sqlite ./agent/toolpl
 - Prefer SQLite or MySQL context managers in production. The RAM context manager is intended for tests and short-lived processes.
 - Validate tool parameter types; never trust model-generated arguments directly.
 - Add authorization, idempotency, timeouts, and audit logging to tools with side effects.
-- Read aggregate token usage from the terminal event. Use `ModelCallCompletedEvent.Usage` only when per-call accounting is needed.
+- Read aggregate token usage from the terminal event. Use callbacks or internal metrics for per-model-call accounting.
 - Use `context.WithTimeout` or `context.WithCancel` to control the lifecycle of the complete agent run.

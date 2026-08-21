@@ -135,9 +135,7 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 
 	wantTypes := []common.AgentEventType{
 		common.AgentEventTypeRunStarted,
-		common.AgentEventTypeModelCallStarted,
 		common.AgentEventTypeAssistantTextDelta,
-		common.AgentEventTypeModelCallCompleted,
 		common.AgentEventTypeFinalAnswerCompleted,
 		common.AgentEventTypeRunCompleted,
 	}
@@ -168,6 +166,47 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 		t.Fatalf("run completed = %+v", completed)
 	}
 	assertRunOutcome(t, ctx, store, signature, contextmgr.RunOutcomeCompleted)
+}
+
+func TestDoStreamsReasoningAndAssistantDeltasSeparately(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	reasoning := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{
+			common.ReasoningBlock("thinking"),
+		},
+	}
+	answer := common.AssistantTextMessage("answer")
+	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{reasoning, answer}}}, 128, ram.NewRAMContextManager())
+
+	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+		UserInput: common.AgentUserInput{Text: "separate output channels"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := readAllEvents(t, ctx, eventStream)
+
+	wantTypes := []common.AgentEventType{
+		common.AgentEventTypeRunStarted,
+		common.AgentEventTypeReasoningDelta,
+		common.AgentEventTypeAssistantTextDelta,
+		common.AgentEventTypeFinalAnswerCompleted,
+		common.AgentEventTypeRunCompleted,
+	}
+	if got := eventTypes(events); !reflect.DeepEqual(got, wantTypes) {
+		t.Fatalf("event types = %v, want %v", got, wantTypes)
+	}
+	reasoningEvents := eventsByType[common.ReasoningDeltaEvent](events)
+	if len(reasoningEvents) != 1 || reasoningEvents[0].Delta != "thinking" {
+		t.Fatalf("reasoning events = %+v", reasoningEvents)
+	}
+	textEvents := eventsByType[common.AssistantTextDeltaEvent](events)
+	if len(textEvents) != 1 || textEvents[0].Delta != "answer" {
+		t.Fatalf("assistant text events = %+v", textEvents)
+	}
 }
 
 func TestDoUsesContextUIDAsPromptCacheKey(t *testing.T) {
@@ -335,10 +374,6 @@ func TestDoEmitsRunFailedForBackgroundModelError(t *testing.T) {
 	}
 	events := readAllEvents(t, ctx, eventStream)
 
-	failedCalls := eventsByType[common.ModelCallFailedEvent](events)
-	if len(failedCalls) != 1 || failedCalls[0].Error != "provider unavailable" {
-		t.Fatalf("model failures = %+v", failedCalls)
-	}
 	terminals := terminalEvents(events)
 	if len(terminals) != 1 {
 		t.Fatalf("terminal events = %+v", terminals)
@@ -446,9 +481,13 @@ func TestDoStreamsParallelToolCompletionOrderAndKeepsResultOrder(t *testing.T) {
 		}
 	}
 
-	requested := eventsByType[common.ToolCallRequestedEvent](events)
-	if got := []string{requested[0].Name, requested[1].Name}; !reflect.DeepEqual(got, []string{"slow", "fast"}) {
-		t.Fatalf("requested order = %v", got)
+	started := eventsByType[common.ToolCallStartedEvent](events)
+	if len(started) != 2 {
+		t.Fatalf("started tool events = %+v", started)
+	}
+	startedNames := map[string]bool{started[0].Name: true, started[1].Name: true}
+	if !startedNames["slow"] || !startedNames["fast"] {
+		t.Fatalf("started tool names = %+v", startedNames)
 	}
 	completed := eventsByType[common.ToolCallCompletedEvent](events)
 	if got := []string{completed[0].Name, completed[1].Name}; !reflect.DeepEqual(got, []string{"fast", "slow"}) {
