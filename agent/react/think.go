@@ -51,7 +51,7 @@ func (a *Agent) think(
 		return nil, fmt.Errorf("think model call: %w", err)
 	}
 
-	promptTokens, cachedTokens, completionTokens := messageTokens(raw)
+	promptTokens, completionTokens, cachedTokens := messageTokens(raw)
 	result.ModelUsage = common.NewAgentUsage(promptTokens, cachedTokens, completionTokens)
 	toolCalls := functionToolCalls(raw)
 	if err := events.WriteWithContext(ctx, common.ModelCallCompletedEvent{

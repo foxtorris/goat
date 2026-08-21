@@ -60,7 +60,7 @@ func compressAggressive(
 		return messages, 0, 0, 0, fmt.Errorf("return content length 0")
 	}
 
-	promptTokens, cachedTokens, completionTokens := messageTokens(raw)
+	promptTokens, completionTokens, cachedTokens := messageTokens(raw)
 	compressedMessages := make([]*schema.AgenticMessage, 0, 2+len(toKeep))
 	if systemMessage != nil {
 		compressedMessages = append(compressedMessages, systemMessage)
