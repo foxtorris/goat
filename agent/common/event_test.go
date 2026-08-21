@@ -7,6 +7,7 @@ func TestAgentEventTypesAndTerminalClassification(t *testing.T) {
 		RunStartedEvent{},
 		ModelCallStartedEvent{},
 		AssistantTextDeltaEvent{},
+		ReasoningDeltaEvent{},
 		ModelCallCompletedEvent{},
 		ModelCallFailedEvent{},
 		ContextCompressionStartedEvent{},

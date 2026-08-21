@@ -6,9 +6,9 @@ import (
 	"log"
 	"time"
 
+	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/react"
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 )
 
 func main() {
