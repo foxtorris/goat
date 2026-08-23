@@ -303,11 +303,11 @@ func (a *Agent) LoadRPCPluginTools(ctx context.Context, address ...string) ([]io
 }
 
 func (a *Agent) buildSystemPrompt(
+	_ *common.AgentContext,
 	planMode bool,
 	specialRequirements []string,
 	skillUsageInstruction string,
 	planUsageInstruction string,
-	actx *common.AgentContext,
 ) string {
 	a.mu.RLock()
 	skillsEnabled := a.skillsEnabled
@@ -606,11 +606,11 @@ func (a *Agent) Do(
 	var messages []*schema.AgenticMessage
 
 	systemPrompt := a.buildSystemPrompt(
+		actx,
 		args.EnablePlanning,
 		args.SpecialRequirements,
 		args.SkillUsageInstruction,
 		args.PlanUsageInstruction,
-		actx,
 	)
 
 	// Initialize or restore conversation
@@ -647,20 +647,36 @@ func (a *Agent) Do(
 			}
 			logging.Infof("Agent.Do: initialized empty conversation %s", contextUID)
 		} else {
-			// Always update system prompt to reflect current mode and requirements
-			systemMessage := schema.SystemAgenticMessage(systemPrompt)
+			// Update system prompt only if content has changed to maximize prompt cache hits
+			newHash := hashSystemPrompt(systemPrompt)
+			needsUpdate := false
+
 			if messages[0].Role == schema.AgenticRoleTypeSystem {
-				// Replace existing system message
-				messages[0] = systemMessage
-				logging.Infof("Agent.Do: updated system message for conversation %s", contextUID)
+				// Compare hash to detect content changes
+				oldText := extractSystemMessageText(messages[0])
+				oldHash := hashSystemPrompt(oldText)
+
+				if newHash != oldHash {
+					// Content changed, replace system message
+					messages[0] = schema.SystemAgenticMessage(systemPrompt)
+					needsUpdate = true
+					logging.Infof("Agent.Do: system message updated for conversation %s (hash: %x -> %x)", contextUID, oldHash, newHash)
+				} else {
+					// Content unchanged, reuse existing message for better cache hits
+					logging.Infof("Agent.Do: system message unchanged for conversation %s (hash: %x), reusing cached version", contextUID, newHash)
+				}
 			} else {
 				// Insert system message at the beginning (for legacy conversations)
-				messages = append([]*schema.AgenticMessage{systemMessage}, messages...)
-				logging.Infof("Agent.Do: inserted system message for conversation %s", contextUID)
+				messages = append([]*schema.AgenticMessage{schema.SystemAgenticMessage(systemPrompt)}, messages...)
+				needsUpdate = true
+				logging.Infof("Agent.Do: system message inserted for conversation %s", contextUID)
 			}
-			// Update the managed context with the new system prompt.
-			if err := a.contextManager.Replace(ctx, contextUID, messages); err != nil {
-				return common.RunSignature{}, nil, fmt.Errorf("failed to update system message: %w", err)
+
+			// Update the managed context only if system message changed
+			if needsUpdate {
+				if err := a.contextManager.Replace(ctx, contextUID, messages); err != nil {
+					return common.RunSignature{}, nil, fmt.Errorf("failed to update system message: %w", err)
+				}
 			}
 
 			logging.Infof("Agent.Do: Restored %d messages from conversation %s", len(messages), contextUID)

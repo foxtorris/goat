@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - React system prompts no longer embed per-run skill descriptions. Enabled skills are discovered at runtime, keeping prompts stable across skill directories and runs.
 - Conversation compression now runs before each model call, so oversized history is compacted before it is sent to the model while normal execution remains available when compression cannot be completed.
+- System message content is now compared by hash before replacement, significantly improving LLM prompt cache hit rates by avoiding unnecessary message object recreation when content is unchanged.
 
 ### Added
 
@@ -21,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Skill descriptions are loaded by `list_available_skills` instead of being copied into the system prompt. `SKILL.md` files must now begin with a frontmatter block enclosed by `---` delimiters.
 - Refactored React run-loop state, tool execution, finalization, and terminal outcome handling into a dedicated run implementation while preserving lifecycle events, callbacks, parallel tool execution, and usage accounting.
 - Compression results are persisted only when they change the conversation. Compression usage is included in run usage and compression callbacks.
+- System message updates now use FNV-1a hash comparison to detect content changes, avoiding unnecessary message replacement and context manager operations when system prompt content is unchanged between runs.
 
 ### Fixed
 
