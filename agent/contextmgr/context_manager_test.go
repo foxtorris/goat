@@ -1,6 +1,7 @@
 package contextmgr_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -131,6 +132,34 @@ func TestManagerCreateLoadAppendIsolation(t *testing.T) {
 			}
 			if err := manager.Delete(ctx, contextUID); err != nil {
 				t.Fatalf("Delete was not idempotent: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagerPreservesGeminiThoughtSignatureType(t *testing.T) {
+	const signatureKey = "_eino_ext_agentic_gemini_thought_signature"
+	want := []byte{0x00, 0x01, 0x7f, 0x80, 0xff}
+
+	for _, factory := range managerFactories() {
+		factory := factory
+		t.Run(factory.name, func(t *testing.T) {
+			ctx := context.Background()
+			manager := factory.new(t)
+			block := common.ReasoningBlock("thinking")
+			block.Extra = map[string]any{signatureKey: append([]byte(nil), want...)}
+			contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{{
+				Role:          schema.AgenticRoleTypeAssistant,
+				ContentBlocks: []*schema.ContentBlock{block},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			loaded := mustLoad(t, manager, contextUID)
+			got, ok := loaded[0].ContentBlocks[0].Extra[signatureKey].([]byte)
+			if !ok || !bytes.Equal(got, want) {
+				t.Fatalf("thought signature = %T(%v), want []byte(%v)", loaded[0].ContentBlocks[0].Extra[signatureKey], got, want)
 			}
 		})
 	}

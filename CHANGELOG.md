@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-08-24
+
+### Changed
+
+- Updated the Eino agentic Claude, Gemini, and OpenAI model integrations and their provider SDK dependencies.
+
+### Fixed
+
+- React finalization now persists the complete Eino `AgenticMessage` returned by the model for both direct answers and max-step final generation, preserving message- and content-block-level provider metadata, reasoning blocks, citations, response cache markers, and server or MCP tool history across subsequent turns.
+- Context manager loads now restore Eino Gemini thought signatures to their original byte representation after JSON persistence, preventing reasoning and function-calling signatures from being silently lost when a conversation is resumed from RAM, file, Redis, or MongoDB storage.
+
 ## [0.2.4] - 2026-08-23
 
 ### Highlights
@@ -205,7 +216,8 @@ keeping conversation state transitions consistent across storage backends.
 - Contribution, security, code of conduct, and GitHub issue and pull request guidance.
 - Dependabot configuration for Go modules and GitHub Actions.
 
-[Unreleased]: https://github.com/torrischen/goat/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/torrischen/goat/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/torrischen/goat/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/torrischen/goat/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/torrischen/goat/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/torrischen/goat/compare/v0.2.1...v0.2.2

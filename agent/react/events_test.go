@@ -428,6 +428,8 @@ func TestDoStreamsReasoningAndAssistantDeltasSeparately(t *testing.T) {
 		ContentBlocks: []*schema.ContentBlock{reasoningBlock},
 	}
 	answer := common.AssistantTextMessage("answer")
+	answer.Extra = map[string]any{"provider-message-id": "response_123"}
+	answer.ContentBlocks[0].Extra = map[string]any{"provider-item-id": "message_123"}
 	manager := ram.NewRAMContextManager()
 	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{reasoning, answer}}}, 128, manager)
 
@@ -470,6 +472,56 @@ func TestDoStreamsReasoningAndAssistantDeltasSeparately(t *testing.T) {
 	}
 	if got := final.ContentBlocks[0].Extra["openai-item-id"]; got != "rs_123" {
 		t.Fatalf("reasoning item ID = %v, want rs_123", got)
+	}
+	if got := final.Extra["provider-message-id"]; got != "response_123" {
+		t.Fatalf("provider message ID = %v, want response_123", got)
+	}
+	if len(final.ContentBlocks) != 2 || final.ContentBlocks[1].AssistantGenText == nil {
+		t.Fatalf("final message content blocks = %+v", final.ContentBlocks)
+	}
+	if got := final.ContentBlocks[1].Extra["provider-item-id"]; got != "message_123" {
+		t.Fatalf("provider text item ID = %v, want message_123", got)
+	}
+}
+
+func TestDoPreservesForcedFinalProviderMetadata(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	final := common.AssistantTextMessage("forced answer")
+	final.Extra = map[string]any{"provider-message-id": "forced_123"}
+	final.ContentBlocks[0].Extra = map[string]any{"provider-item-id": "forced_item_123"}
+	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{
+		{assistantToolCalls(&schema.FunctionToolCall{CallID: "call-1", Name: "work", Arguments: `{}`})},
+		{final},
+	}}
+	manager := ram.NewRAMContextManager()
+	agent := NewAgent(llm, 128, manager)
+	agent.AddTool(ctx, common.NewDefaultTool(
+		"work",
+		"perform work",
+		common.NewToolParameters(),
+		func(*common.AgentContext, map[string]any) common.ToolResult {
+			return common.NewDefaultToolResult("done")
+		},
+	))
+
+	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+		UserInput: common.AgentUserInput{Text: "use the tool"},
+		MaxStep:   1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readAllEvents(t, ctx, eventStream)
+
+	history := mustLoadHistory(t, ctx, manager, signature.ContextUID)
+	stored := history[len(history)-1]
+	if got := stored.Extra["provider-message-id"]; got != "forced_123" {
+		t.Fatalf("provider message ID = %v, want forced_123", got)
+	}
+	if got := stored.ContentBlocks[0].Extra["provider-item-id"]; got != "forced_item_123" {
+		t.Fatalf("provider item ID = %v, want forced_item_123", got)
 	}
 }
 

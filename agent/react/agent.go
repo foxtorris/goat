@@ -374,22 +374,6 @@ func settleConversationFinal(
 	return nil
 }
 
-func responseMetaFromUsage(usage *common.AgentUsage) *schema.AgenticResponseMeta {
-	if usage == nil {
-		return nil
-	}
-	return &schema.AgenticResponseMeta{
-		TokenUsage: &schema.TokenUsage{
-			PromptTokens:     usage.PromptTokens,
-			CompletionTokens: usage.CompletionTokens,
-			TotalTokens:      usage.PromptTokens + usage.CompletionTokens,
-			PromptTokenDetails: schema.PromptTokenDetails{
-				CachedTokens: usage.CachedTokens,
-			},
-		},
-	}
-}
-
 func addRunUsage(total *common.AgentUsage, usage *common.AgentUsage) {
 	if total != nil {
 		total.Add(usage)

@@ -16,7 +16,7 @@ func (a *Agent) generateFinalAnswer(
 	specialRequirements []string,
 	events streaming.Stream[common.AgentEvent],
 	opts ...model.Option,
-) (string, *common.AgentUsage, error) {
+) (*schema.AgenticMessage, *common.AgentUsage, error) {
 	var promptText string
 	if len(specialRequirements) > 0 {
 		promptText = "Please provide a final answer to the user's question. Special requirements:\n"
@@ -34,10 +34,10 @@ func (a *Agent) generateFinalAnswer(
 
 	raw, err := a.streamModelResponse(ctx, finalMessages, events, finalOpts...)
 	if err != nil {
-		return "", nil, fmt.Errorf("final model call: %w", err)
+		return nil, nil, fmt.Errorf("final model call: %w", err)
 	}
 
 	promptTokens, completionTokens, cachedTokens := messageTokens(raw)
 	usage := common.NewAgentUsage(promptTokens, cachedTokens, completionTokens)
-	return assistantText(raw), usage, nil
+	return raw, usage, nil
 }

@@ -55,6 +55,11 @@ const (
 const (
 	sequenceNodeLeaf   = "leaf"
 	sequenceNodeConcat = "concat"
+
+	// Eino's Gemini adapter stores thought signatures as []byte in a content
+	// block's Extra map. encoding/json decodes interface values as strings, so
+	// restore the provider-defined type when loading persisted messages.
+	geminiThoughtSignatureExtraKey = "_eino_ext_agentic_gemini_thought_signature"
 )
 
 func keyHead(uid common.ContextUID) string {
@@ -1057,6 +1062,7 @@ func (m *Manager) loadSequence(ctx context.Context, ref sequenceRef) ([]*schema.
 		if err := json.Unmarshal(payload, &node); err != nil {
 			return nil, fmt.Errorf("decode sequence object %q: %w", key, err)
 		}
+		restoreAgenticMessageExtraTypes(node.Messages)
 		switch node.Kind {
 		case sequenceNodeLeaf:
 			result = append(result, node.Messages...)
@@ -1073,6 +1079,27 @@ func (m *Manager) loadSequence(ctx context.Context, ref sequenceRef) ([]*schema.
 		return nil, fmt.Errorf("sequence count mismatch: loaded %d, expected %d", len(result), ref.Count)
 	}
 	return result, nil
+}
+
+func restoreAgenticMessageExtraTypes(messages []*schema.AgenticMessage) {
+	for _, message := range messages {
+		if message == nil {
+			continue
+		}
+		for _, block := range message.ContentBlocks {
+			if block == nil || block.Extra == nil {
+				continue
+			}
+			encoded, ok := block.Extra[geminiThoughtSignatureExtraKey].(string)
+			if !ok {
+				continue
+			}
+			signature, err := base64.StdEncoding.DecodeString(encoded)
+			if err == nil {
+				block.Extra[geminiThoughtSignatureExtraKey] = signature
+			}
+		}
+	}
 }
 
 func (m *Manager) findRunSnapshot(

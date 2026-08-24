@@ -102,7 +102,7 @@ func (r *reactRun) writeFinal() error {
 		return err
 	}
 
-	finalAnswer, usage, err := r.agent.generateFinalAnswer(
+	finalMessage, usage, err := r.agent.generateFinalAnswer(
 		r.ctx,
 		r.messages,
 		r.args.SpecialRequirements,
@@ -113,8 +113,7 @@ func (r *reactRun) writeFinal() error {
 		return operationError("generate final answer", err)
 	}
 	addRunUsage(r.usage, usage)
-	finalMessage := common.AssistantTextMessage(finalAnswer)
-	finalMessage.ResponseMeta = responseMetaFromUsage(usage)
+	finalAnswer := assistantText(finalMessage)
 	if err := settleConversationFinal(
 		r.ctx,
 		r.agent.contextManager,
@@ -151,28 +150,14 @@ func (r *reactRun) writeFinal() error {
 	return nil
 }
 
-func (r *reactRun) completeDirectAnswer(raw *schema.AgenticMessage, reasoningContent string) error {
+func (r *reactRun) completeDirectAnswer(raw *schema.AgenticMessage) error {
 	finalAnswer := assistantText(raw)
-	finalMessage := common.AssistantTextMessage(finalAnswer)
-	finalMessage.ResponseMeta = raw.ResponseMeta
-
-	// Keep the original reasoning blocks so provider metadata in ContentBlock.Extra
-	// (such as the Responses API item ID) survives when the final message is stored.
-	reasoningBlocks := make([]*schema.ContentBlock, 0)
-	for _, block := range raw.ContentBlocks {
-		if block != nil && block.Reasoning != nil {
-			reasoningBlocks = append(reasoningBlocks, block)
-		}
-	}
-	if len(reasoningBlocks) > 0 {
-		finalMessage.ContentBlocks = append(reasoningBlocks, finalMessage.ContentBlocks...)
-	}
 	if err := settleConversationFinal(
 		r.ctx,
 		r.agent.contextManager,
 		r.signature,
 		&r.messages,
-		finalMessage,
+		raw,
 	); err != nil {
 		return operationError("settle run", err)
 	}
@@ -550,7 +535,7 @@ func (r *reactRun) runLoop() error {
 			continue
 		}
 
-		return r.completeDirectAnswer(raw, reasoningContent)
+		return r.completeDirectAnswer(raw)
 	}
 }
 
