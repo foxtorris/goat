@@ -7,28 +7,25 @@ import (
 	"log"
 	"os"
 
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/agent/tools"
+	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 	"github.com/torrischen/goat/streaming"
 )
 
 func main() {
 	ctx := context.Background()
 
-	// Initialize the LLM
-	llm, err := agenticopenai.NewResponsesModel(ctx, &agenticopenai.ResponsesConfig{
-		APIKey: os.Getenv("OPENAI_API_KEY"),
-		Model:  "gpt-4o",
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
+	// Initialize the LLM (OpenAI Responses API)
+	model := openaiprovider.New(
+		openaiprovider.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+		openaiprovider.WithModel("gpt-4o"),
+	)
 
 	// Create the agent with RAM context manager
-	agent := react.NewAgent(llm, 128, ram.NewRAMContextManager())
+	agent := react.NewAgent(model, 128, ram.NewRAMContextManager())
 
 	// Register subagent tools - this allows the agent to spawn and query subagents
 	agent.AddTool(ctx, tools.SpawnSubAgent(agent))

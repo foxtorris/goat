@@ -37,11 +37,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/agent/tools"
+	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 	"github.com/torrischen/goat/streaming"
 )
 
@@ -161,16 +161,17 @@ func newTestEnv(ctx context.Context) (*testEnv, error) {
 		return nil, err
 	}
 
-	llm, err := agenticopenai.NewResponsesModel(ctx, &agenticopenai.ResponsesConfig{
-		BaseURL: os.Getenv("OPENAI_BASE_URL"),
-		APIKey:  os.Getenv("OPENAI_API_KEY"),
-		Model:   envOr("OPENAI_MODEL", "gpt-5.2"),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create model: %w", err)
+	opts := []openaiprovider.Option{
+		openaiprovider.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
 	}
+	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
+		opts = append(opts, openaiprovider.WithBaseURL(baseURL))
+	}
+	opts = append(opts, openaiprovider.WithModel(envOr("OPENAI_MODEL", "gpt-5.2")))
 
-	agent := react.NewAgent(llm, 128, ram.NewRAMContextManager())
+	model := openaiprovider.New(opts...)
+
+	agent := react.NewAgent(model, 128, ram.NewRAMContextManager())
 	agent.EnableSkills()
 	agent.AddTools(ctx,
 		fetchIncidentTool(),
