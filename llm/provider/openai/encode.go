@@ -68,10 +68,11 @@ func encodeUserBlocks(msg *message.Message) []responses.ResponseInputItemUnionPa
 			}
 		case message.BlockToolResult:
 			if block.ToolResult != nil {
-				items = append(items, responses.ResponseInputItemParamOfFunctionCallOutput(
-					block.ToolResult.CallID,
-					block.ToolResult.Text(),
-				))
+				item := responses.ResponseInputItemParamOfFunctionCallOutput(block.ToolResult.Text())
+				if item.OfFunctionCallOutput != nil {
+					item.OfFunctionCallOutput.CallID = param.NewOpt(block.ToolResult.CallID)
+				}
+				items = append(items, item)
 			}
 		}
 	}

@@ -6,9 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-04
+
 ### Changed
 
 - **Breaking:** replaced the separate context message append and head commit operations in `contextmgr.Store` with atomic `CommitAppend`, which publishes message rows and the head together; removed the unused `ListContexts` operation. Custom Store implementations must provide the new contract.
+- Updated direct dependencies: Resty to `v2.17.2`, MySQL driver to `v1.10.1`, MCP Go to `v1.0.0`, OpenAI Go to `v3.56.0`, MongoDB driver to `v2.8.2`, Zap to `v1.28.0`, gRPC to `v1.83.2`, and Protobuf to `v1.36.12`.
+
+### Removed
+
+- **Breaking:** removed the redundant `SimilaritySearch` API and `SimilaritySearchArgs` compatibility alias from the Milvus retrievers. Use `Search` with `SearchArgs` instead.
 
 ## [0.3.0] - 2026-08-30
 
@@ -236,7 +243,8 @@ keeping conversation state transitions consistent across storage backends.
 - Contribution, security, code of conduct, and GitHub issue and pull request guidance.
 - Dependabot configuration for Go modules and GitHub Actions.
 
-[Unreleased]: https://github.com/torrischen/goat/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/torrischen/goat/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/torrischen/goat/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/torrischen/goat/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/torrischen/goat/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/torrischen/goat/compare/v0.2.3...v0.2.4
